@@ -31,6 +31,8 @@ import {
     withGoBackButton,
 } from './utils.js';
 import { withStmbWriteLane } from './stmbJobs.js';
+// STMBC-HOOK(clipper): paired keyword-activated context entry on clip save (fork; plan §4.2).
+import { maybeGeneratePairedContextEntry } from './clipperPlus.js';
 
 const MODULE_NAME = 'STMemoryBooks-ClipManager';
 const CREATE_NEW_VALUE = '__stmb_create_new_clip_entry__';
@@ -747,6 +749,12 @@ async function saveNewClip(lorebookName, lorebookData, dlg) {
     newEntry.order = typeof newEntry.order === 'number' ? newEntry.order : 100;
 
     await saveLorebook(lorebookName, lorebookData);
+
+    // STMBC-HOOK(clipper): after the upstream [STMB Clip] entry is written, generate +
+    // write the paired context entry (fork; plan §4.2). No-op unless Clipper+ is enabled;
+    // self-contained (never throws), so the clip above is unaffected either way.
+    await maybeGeneratePairedContextEntry({ lorebookName, lorebookData, quote: bulletText, headline, quoteTitle: title });
+
     return true;
 }
 
