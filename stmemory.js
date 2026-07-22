@@ -17,6 +17,8 @@ import {
     resolveContextSettingEntries,
     resolveContextSettingEntriesFromRefs,
 } from './contextSettingsManager.js';
+// STMBC-HOOK(injection): living-lorebook context injection + error-control rules (fork; plan §4.4, §5).
+import { buildLivingContextPreamble } from './injection.js';
 const $ = window.jQuery;
 
 const MODULE_NAME = 'STMemoryBooks-Memory';
@@ -1473,9 +1475,27 @@ async function buildPrompt(compiledScene, profile) {
     // Build scene text for user prompt
     const additionalContext = await resolveAdditionalContextEntries(profile, compiledScene);
     const sceneText = formatSceneForAI(messages, metadata, previousSummariesContext, additionalContext.entries);
-    
+
+    // STMBC-HOOK(injection): prepend token-capped living-lorebook entries (delta-not-rehash)
+    // + error-control rules between the system prompt and the scene (fork; plan §4.4, §5).
+    // Self-gating (default OFF) and never-throws => byte-identical upstream prompt when disabled.
+    let injectionPreamble = '';
+    try {
+        injectionPreamble = await buildLivingContextPreamble({
+            compiledScene,
+            profile,
+            sceneText,
+            systemPrompt: processedSystemPrompt,
+        });
+    } catch (e) {
+        console.warn(`${MODULE_NAME}: living-context injection failed; using base prompt`, e);
+        injectionPreamble = '';
+    }
+
     // Combine system prompt and scene
-    const finalPrompt = `${processedSystemPrompt}\n\n${sceneText}`;
+    const finalPrompt = injectionPreamble
+        ? `${processedSystemPrompt}\n\n${injectionPreamble}\n\n${sceneText}`
+        : `${processedSystemPrompt}\n\n${sceneText}`;
 
     // Apply user-selected outgoing regex scripts (bypass engine gating)
     try {
