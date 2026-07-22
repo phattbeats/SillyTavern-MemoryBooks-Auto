@@ -55,6 +55,8 @@ import {
   clearAutoSummaryState,
   retryAutoSummaryAfterJobIdle,
 } from "./autosummary.js";
+// STMBC-HOOK(sentinel): autonomous scene-boundary detection cycle (fork; plan §4.1).
+import { handleSentinelMessageReceived } from "./sentinel.js";
 import {
   editProfile,
   newProfile,
@@ -1024,6 +1026,9 @@ async function handleMessageReceived() {
     setTimeout(validateSceneMarkers, SCENE_MANAGEMENT.VALIDATION_DELAY_MS);
     setTimeout(refreshMemoryBoundaryUi, SCENE_MANAGEMENT.VALIDATION_DELAY_MS);
     await handleAutoSummaryMessageReceived();
+    // STMBC-HOOK(sentinel): run one detection cycle on the same proven cadence
+    // event. No-ops unless the sentinel is enabled for this chat (plan §3.3).
+    await handleSentinelMessageReceived();
     await evaluateTrackers();
   } catch (error) {
     console.error(
@@ -1129,7 +1134,9 @@ function validateSceneMemoryRange(startId, endId) {
   return true;
 }
 
-async function runSceneMemoryRange(startId, endId, options = {}) {
+// STMBC-HOOK(sentinel): exported so sentinel.js can memorize a detected scene
+// range via a direct in-extension call (plan §4.1). Signature unchanged.
+export async function runSceneMemoryRange(startId, endId, options = {}) {
   const { showSceneToast = true } = options;
 
   if (!validateSceneMemoryRange(startId, endId)) {
