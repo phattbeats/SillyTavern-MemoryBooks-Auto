@@ -1,0 +1,7 @@
+scratch: deliberately bad smoke-test commit
+
+This commit exists only so the GitHub Actions authorship-check job has
+something to run against. The author + trailer are intentionally violations
+of the @phattbeats-only rule so the job's failure mode is observable.
+
+Co-Authored-By: Claude Van Dam <van-dam@phatt.tech>
