@@ -5,3 +5,5 @@ rule so we can demonstrate that the local commit-msg hook AND the
 GitHub Actions authorship-check job both reject it.
 
 Co-Authored-By: Claude Van Dam <van-dam@phatt.tech>
+
+<- regenerated smoke test content after rebase; ensures the new workflow file is in HEAD.
