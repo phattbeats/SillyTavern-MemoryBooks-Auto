@@ -28,15 +28,27 @@ permissions:
 
 jobs:
   authorship:
-    name: @phattbeats-only authorship check
+    name: "@phattbeats-only authorship check"
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
-      - name: Checkout PR head
+      - name: Checkout PR head (tip of the source branch)
         uses: actions/checkout@v4
         with:
+          # Default `pull_request` checkout is the synthetic merge commit, whose
+          # author + message are derived from the base and not what we want to
+          # check. Force the checkout onto the actual PR head SHA so
+          # `git log -1` reports the real committer of the top commit.
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
+          # We must opt in to checking out the PR's head ref for a same-repo
+          # PR when GitHub Actions would otherwise default to the merge ref.
+          # This is the supported way to read the actual PR head commit. For
+          # this single-user fork the PR author is the repo owner, so the
+          # trust assumption is fine; if external contributors ever open a PR,
+          # revisit by setting this false again and switching to the merge ref.
+          allow-unsafe-pr-checkout: true
 
       - name: Verify HEAD author is phattbeats
         env:
