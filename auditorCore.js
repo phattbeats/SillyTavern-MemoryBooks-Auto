@@ -225,12 +225,59 @@ export function emptyNotes() {
     };
 }
 
+/** Lowercase, strip a leading article, collapse whitespace — the dedup key. */
+function aliasKey(name) {
+    return String(name ?? '')
+        .toLowerCase()
+        .replace(/^(the|a|an)\s+/, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+/**
+ * True when `shortKey`'s words are a contiguous, word-boundary-safe run inside
+ * `longKey`'s words (e.g. "david" inside "david kelly", "kevan" inside "kevan
+ * the bold"). Used to fold a bare first name / short label into a fuller one
+ * extracted from a different chunk, since per-chunk extraction has no shared
+ * canonical-name state across chunks.
+ */
+function isAliasOf(shortKey, longKey) {
+    if (shortKey === longKey) return true;
+    const shortTokens = shortKey.split(' ');
+    const longTokens = longKey.split(' ');
+    if (!shortTokens.length || shortTokens.length >= longTokens.length) return false;
+    for (let i = 0; i <= longTokens.length - shortTokens.length; i++) {
+        if (shortTokens.every((t, j) => longTokens[i + j] === t)) return true;
+    }
+    return false;
+}
+
 function mergeNamed(map, names, chunkIndex) {
     for (const name of names) {
-        const key = name.toLowerCase();
-        const entry = map[key] || (map[key] = { name, count: 0, chunks: [] });
-        entry.count++;
-        if (entry.chunks[entry.chunks.length - 1] !== chunkIndex) entry.chunks.push(chunkIndex);
+        const key = aliasKey(name);
+        if (!key) continue;
+        let matchKey = key in map ? key : null;
+        if (!matchKey) {
+            for (const existingKey of Object.keys(map)) {
+                if (isAliasOf(existingKey, key) || isAliasOf(key, existingKey)) {
+                    matchKey = existingKey;
+                    break;
+                }
+            }
+        }
+        if (matchKey) {
+            const entry = map[matchKey];
+            entry.count++;
+            if (entry.chunks[entry.chunks.length - 1] !== chunkIndex) entry.chunks.push(chunkIndex);
+            if (key.length > matchKey.length) {
+                // A fuller name showed up later — re-key to it and adopt it as canonical.
+                delete map[matchKey];
+                map[key] = entry;
+                entry.name = name.trim();
+            }
+        } else {
+            map[key] = { name: name.trim(), count: 1, chunks: [chunkIndex] };
+        }
     }
 }
 
