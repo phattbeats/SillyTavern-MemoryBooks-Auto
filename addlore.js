@@ -635,10 +635,35 @@ export async function addMemoryToLorebook(memoryResult, lorebookValidation, opti
  * @param {string} entryTitle - The generated title for this entry
  * @param {Object} lorebookSettings - The user-configured lorebook settings
  */
+/**
+ * Drops keywords that are a whole-word substring of another keyword already
+ * in the list (e.g. "Brandon" alongside "Brandon Kelly"), keeping the more
+ * specific/longer form. The coverage-regen path (PR #20, 417f90e) scopes
+ * keywords per-entity in its own prompt, but the primary scene-entry path
+ * takes suggestedKeys from the summarizer as-is — this is the equivalent
+ * mitigation for that path, cutting down on same-entry co-firing when the
+ * LLM emits both a nickname and a full name for the same person.
+ * @param {string[]} keys
+ * @returns {string[]}
+ */
+function dedupeOverlappingKeys(keys) {
+    const list = Array.from(new Set((keys || []).map(k => String(k || '').trim()).filter(Boolean)));
+    return list.filter((key, i) => {
+        const keyLower = key.toLowerCase();
+        return !list.some((other, j) => {
+            if (i === j) return false;
+            const otherLower = other.toLowerCase();
+            if (otherLower.length <= keyLower.length) return false;
+            const boundary = new RegExp(`(^|\\s)${keyLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`);
+            return boundary.test(otherLower);
+        });
+    });
+}
+
 function populateLorebookEntry(entry, memoryResult, entryTitle, lorebookSettings) {
     // Core content and keywords
     entry.content = memoryResult.content;
-    entry.key = memoryResult.suggestedKeys || [];
+    entry.key = dedupeOverlappingKeys(memoryResult.suggestedKeys || []);
     entry.comment = entryTitle;
     
     // Extract order number from title for auto-numbering
