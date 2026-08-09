@@ -589,7 +589,15 @@ const SUPPORTED_COMPLETION_SOURCES = [
   "siliconflow",
 ];
 
-const DEFAULT_MAX_TOKENS = 4000;
+// PHA-1846: was 4000 (v5.2.1 upstream). That silently overrode the user's own
+// Chat Completion preset's Max Response Length for every STMB request (see
+// stmemory.js sendRawCompletionRequest: "STMB override wins if set (>0)"),
+// which is exactly backwards for /stmb-auto — a headless, full-story pass
+// needs whatever budget the user already configured, not a small manual-mode
+// default. 0 already means "inherit the Chat Completion preset" throughout
+// this file (validateSettings, the settings-popup read path); make that the
+// out-of-the-box default instead of a value nobody chose.
+const DEFAULT_MAX_TOKENS = 0;
 const DEFAULT_TITLE_FORMAT = "[000] - {{title}}";
 const STLO_EXTENSION_KEYS = new Set([
   "sillytavern-lorebookordering",
@@ -676,7 +684,7 @@ const defaultSettings = {
   // AUTO_MODULE_DEFAULTS on read so missing fields stay backwards-compatible.
   // Initialize on a fresh install so the UI panel has a place to write to.
   autoModule: {},
-  migrationVersion: 6,
+  migrationVersion: 7,
 };
 
 // Current state variables
@@ -2488,6 +2496,24 @@ function initializeSettings() {
       extension_settings.STMemoryBooks.moduleSettings.showSceneMarkerButtons = false;
     }
     extension_settings.STMemoryBooks.migrationVersion = 6;
+    saveSettingsDebounced();
+  }
+
+  // Migration to v7 (PHA-1846 follow-up): lowering DEFAULT_MAX_TOKENS from
+  // 4000 to 0 above only helps *fresh* settings objects. Anyone who already
+  // had this extension installed got 4000 written into moduleSettings.maxTokens
+  // by validateSettings the first time it ever ran, and that persisted value
+  // silently caps every STMB request regardless of the live Chat Completion
+  // preset (see stmemory.js's override precedence) -- with no UI affordance
+  // that made this discoverable (the user hit this exact case and had no way
+  // to find the settings popup to fix it by hand). One-time reset of that
+  // specific stale value back to "inherit the preset"; anyone who deliberately
+  // wants 4000 can set it again from the settings popup.
+  if (currentVersion < 7) {
+    if (extension_settings.STMemoryBooks.moduleSettings?.maxTokens === 4000) {
+      extension_settings.STMemoryBooks.moduleSettings.maxTokens = DEFAULT_MAX_TOKENS;
+    }
+    extension_settings.STMemoryBooks.migrationVersion = 7;
     saveSettingsDebounced();
   }
 

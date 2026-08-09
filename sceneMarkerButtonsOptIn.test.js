@@ -44,12 +44,15 @@ test('defaultSettings declares showSceneMarkerButtons as false (opt-in)', () => 
     );
 });
 
-test('defaultSettings migrationVersion is 6 (forces the v6 migration to run on existing installs)', () => {
+test('defaultSettings migrationVersion is at least 6 (forces the v6 migration to run on existing installs)', () => {
     const defaultBlock = indexSrc.match(
         /const\s+defaultSettings\s*=\s*\{[\s\S]*?migrationVersion\s*:\s*(\d+)\s*,/,
     );
     assert.ok(defaultBlock, 'defaultSettings block not found');
-    assert.equal(defaultBlock[1], '6', 'expected migrationVersion: 6');
+    assert.ok(
+        Number(defaultBlock[1]) >= 6,
+        `expected migrationVersion >= 6, got ${defaultBlock[1]}`,
+    );
 });
 
 // ----- v6 migration ---------------------------------------------------------

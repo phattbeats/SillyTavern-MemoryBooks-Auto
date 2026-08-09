@@ -17,6 +17,50 @@ Fork home: https://github.com/phattbeats/SillyTavern-MemoryBooks-Auto.
 > contents and is preserved for audit purposes.
 
 
+## v0.0.16 (2026-08-09) — fix: existing installs were still stuck at the old Max Response Tokens default after v0.0.15
+
+Closes [PHA-1846](/PHA/issues/PHA-1846). v0.0.15 changed `DEFAULT_MAX_TOKENS`
+from `4000` to `0`, but that constant only seeds a *fresh* settings object —
+anyone who already had this extension installed got `4000` written into
+`moduleSettings.maxTokens` by `validateSettings` the very first time it ran,
+long before this fix existed, and that persisted value kept silently capping
+every STMB request the same as before. The v0.0.15 changelog entry told
+affected users to open Settings and set the field to `0` by hand, but the
+user hit this exact case and reported having no way to find the settings
+popup at all (it lives under the magic-wand Extensions menu → **Memory
+Books**, not the left-hand Extensions panel — a discoverability gap of its
+own). Added a one-time `migrationVersion: 7` step in `initializeSettings()`
+that resets `moduleSettings.maxTokens` back to `0` specifically when it's
+still exactly the old default (`4000`), so existing installs self-heal on
+next load without requiring the user to find or touch Settings. Anyone who
+deliberately wants `4000` can still set it again from the settings popup.
+
+## v0.0.15 (2026-08-09) — fix: STMB's own Max Response Tokens setting silently overrode the user's Chat Completion preset
+
+Closes [PHA-1846](/PHA/issues/PHA-1846). The user had "Max Response Length" set
+to 50k in their SillyTavern Chat Completion preset, but LiteLLM logs showed
+every `/stmb-auto` request landing around 5–10k tokens, and the scene-memory
+step kept failing with `AI response JSON appears incomplete (text ends
+mid-sentence). Try increasing Max Response Length.` — the toast pointed at a
+setting that was, from the user's perspective, already generous. Root cause:
+`sendRawCompletionRequest` (`stmemory.js`) computes the request's `max_tokens`
+as "STMB's own **Max Response Tokens** setting wins outright if it's set to
+anything above 0 — otherwise fall back to the live Chat Completion preset."
+That's intentional, documented behavior (0 = "inherit the preset"), but
+`DEFAULT_MAX_TOKENS` — the value new installs (and any settings reset) start
+with — was `4000`, sized for short, one-message manual summaries. Every STMB
+request, including `/stmb-auto`'s full-chunk scene memories and audit-derived
+lorebook entries, was silently capped at that value regardless of what the
+user configured in their own preset, and 4000 tokens isn't enough headroom
+for a large narrative memory's JSON payload — hence the mid-sentence
+truncation. Fixed by changing `DEFAULT_MAX_TOKENS` to `0`, so an
+out-of-the-box install (and `/stmb-auto`, the "no parameters, just run it"
+feature this issue is about) inherits the user's actual Chat Completion
+preset instead of a manual-mode value nobody chose. Existing installs with an
+already-saved `Max Response Tokens` value are unaffected by this default —
+set that field to `0` (or to your preset's own value) in Settings to pick up
+the fix immediately.
+
 ## v0.0.14 (2026-08-09) — fix: /stmb-auto ReferenceError killed the run right after the audit step
 
 Closes [PHA-1846](/PHA/issues/PHA-1846). The user reran `/stmb-auto` on 0.0.13
