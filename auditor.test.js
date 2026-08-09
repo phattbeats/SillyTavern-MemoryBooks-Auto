@@ -182,6 +182,46 @@ test('mergeNotes: dedupes named entities case-insensitively with chunk provenanc
     assert.equal(n.chunksProcessed, 2);
 });
 
+test('mergeNotes: folds a bare first name into a fuller name from a later chunk', () => {
+    const n = emptyNotes();
+    mergeNotes(n, { characters: ['David'] }, 0);
+    mergeNotes(n, { characters: ['David Kelly'] }, 1);
+    assert.equal(Object.keys(n.characters).length, 1);
+    assert.equal(n.characters['david kelly'].name, 'David Kelly');
+    assert.equal(n.characters['david kelly'].count, 2);
+    assert.deepEqual(n.characters['david kelly'].chunks, [0, 1]);
+});
+
+test('mergeNotes: folds a fuller name seen first, then a later bare alias', () => {
+    const n = emptyNotes();
+    mergeNotes(n, { characters: ['Kevan the Bold'] }, 0);
+    mergeNotes(n, { characters: ['Kevan'] }, 1);
+    assert.equal(Object.keys(n.characters).length, 1);
+    assert.equal(n.characters['kevan the bold'].name, 'Kevan the Bold');
+    assert.equal(n.characters['kevan the bold'].count, 2);
+});
+
+test('mergeNotes: strips a leading article so "the Great Hall" folds into "Great Hall"', () => {
+    const n = emptyNotes();
+    mergeNotes(n, { locations: ['the Great Hall'] }, 0);
+    mergeNotes(n, { locations: ['Great Hall'] }, 1);
+    assert.equal(Object.keys(n.locations).length, 1);
+    assert.equal(n.locations['great hall'].count, 2);
+});
+
+test('mergeNotes: folds a suffixed variant like "Guest wing (Palace of Aelir)"', () => {
+    const n = emptyNotes();
+    mergeNotes(n, { locations: ['Guest wing'] }, 0);
+    mergeNotes(n, { locations: ['Guest wing (Palace of Aelir)'] }, 1);
+    assert.equal(Object.keys(n.locations).length, 1);
+});
+
+test('mergeNotes: does not fold unrelated names sharing no word run', () => {
+    const n = emptyNotes();
+    mergeNotes(n, { characters: ['Ergeon', 'Anariel'] }, 0);
+    assert.equal(Object.keys(n.characters).length, 2);
+});
+
 test('mergeNotes: null partial still advances chunksProcessed', () => {
     const n = emptyNotes();
     mergeNotes(n, null, 0);
