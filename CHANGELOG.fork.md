@@ -17,6 +17,24 @@ Fork home: https://github.com/phattbeats/SillyTavern-MemoryBooks-Auto.
 > contents and is preserved for audit purposes.
 
 
+## v0.0.16 (2026-08-09) — fix: existing installs were still stuck at the old Max Response Tokens default after v0.0.15
+
+Closes [PHA-1846](/PHA/issues/PHA-1846). v0.0.15 changed `DEFAULT_MAX_TOKENS`
+from `4000` to `0`, but that constant only seeds a *fresh* settings object —
+anyone who already had this extension installed got `4000` written into
+`moduleSettings.maxTokens` by `validateSettings` the very first time it ran,
+long before this fix existed, and that persisted value kept silently capping
+every STMB request the same as before. The v0.0.15 changelog entry told
+affected users to open Settings and set the field to `0` by hand, but the
+user hit this exact case and reported having no way to find the settings
+popup at all (it lives under the magic-wand Extensions menu → **Memory
+Books**, not the left-hand Extensions panel — a discoverability gap of its
+own). Added a one-time `migrationVersion: 7` step in `initializeSettings()`
+that resets `moduleSettings.maxTokens` back to `0` specifically when it's
+still exactly the old default (`4000`), so existing installs self-heal on
+next load without requiring the user to find or touch Settings. Anyone who
+deliberately wants `4000` can still set it again from the settings popup.
+
 ## v0.0.15 (2026-08-09) — fix: STMB's own Max Response Tokens setting silently overrode the user's Chat Completion preset
 
 Closes [PHA-1846](/PHA/issues/PHA-1846). The user had "Max Response Length" set

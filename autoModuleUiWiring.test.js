@@ -70,10 +70,13 @@ test('defaultSettings declares autoModule as an empty container (so writes are s
         /const\s+defaultSettings\s*=\s*\{[\s\S]*?autoModule\s*:\s*\{[\s\S]*?migrationVersion/,
         'expected defaultSettings to include autoModule: {} before migrationVersion',
     );
-    assert.match(
-        src,
-        /const\s+defaultSettings\s*=\s*\{[\s\S]*?autoModule\s*:\s*\{[\s\S]*?migrationVersion\s*:\s*6/,
-        'expected migrationVersion to be 6 (v6 supersedes v5; v6 adds the showSceneMarkerButtons opt-in)',
+    const migrationVersionBlock = src.match(
+        /const\s+defaultSettings\s*=\s*\{[\s\S]*?autoModule\s*:\s*\{[\s\S]*?migrationVersion\s*:\s*(\d+)/,
+    );
+    assert.ok(migrationVersionBlock, 'expected a migrationVersion field after autoModule: {}');
+    assert.ok(
+        Number(migrationVersionBlock[1]) >= 6,
+        `expected migrationVersion >= 6 (v6 supersedes v5; v6 adds the showSceneMarkerButtons opt-in), got ${migrationVersionBlock[1]}`,
     );
 });
 
