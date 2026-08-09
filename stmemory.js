@@ -26,6 +26,57 @@ const $ = window.jQuery;
 const MODULE_NAME = 'STMemoryBooks-Memory';
 let hasWarnedMissingChatCompletionService = false;
 
+// Status codes worth retrying: rate limit + transient upstream/provider overload.
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504, 529]);
+const MAX_FETCH_RETRIES = 4;
+const RETRY_BASE_DELAY_MS = 1000;
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Parses a Retry-After header (seconds or HTTP-date) into a millisecond delay.
+ * @param {Response} res
+ * @returns {number|null}
+ */
+function parseRetryAfterMs(res) {
+    const header = res?.headers?.get?.('retry-after');
+    if (!header) return null;
+    const asSeconds = Number(header);
+    if (Number.isFinite(asSeconds)) return Math.max(0, asSeconds * 1000);
+    const asDate = Date.parse(header);
+    if (!Number.isNaN(asDate)) return Math.max(0, asDate - Date.now());
+    return null;
+}
+
+/**
+ * fetch() with retry-with-backoff on 429/5xx so a single transient rate-limit
+ * or provider hiccup doesn't kill the whole /stmb-auto chunk loop.
+ * @param {string} url
+ * @param {RequestInit} init
+ * @param {AbortSignal|null} signal
+ * @returns {Promise<Response>}
+ */
+async function fetchWithRetry(url, init, signal) {
+    let lastRes = null;
+    for (let attempt = 0; attempt <= MAX_FETCH_RETRIES; attempt++) {
+        if (signal?.aborted) {
+            throw new DOMException('Aborted', 'AbortError');
+        }
+        const res = await fetch(url, init);
+        if (res.ok || !RETRYABLE_STATUS_CODES.has(res.status) || attempt === MAX_FETCH_RETRIES) {
+            return res;
+        }
+        lastRes = res;
+        const retryAfterMs = parseRetryAfterMs(res);
+        const backoffMs = retryAfterMs ?? (RETRY_BASE_DELAY_MS * (2 ** attempt) + Math.floor(Math.random() * 250));
+        console.warn(`[${MODULE_NAME}] LLM request got ${res.status}, retrying in ${backoffMs}ms (attempt ${attempt + 1}/${MAX_FETCH_RETRIES})`);
+        await sleep(backoffMs);
+    }
+    return lastRes;
+}
+
 const MEMORY_RESPONSE_JSON_SCHEMA = Object.freeze({
     name: 'stmb_memory',
     description: 'A generated Memory Books lorebook memory.',
@@ -594,12 +645,12 @@ export async function sendRawCompletionRequest({
         }
     }
 
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
         method: 'POST',
         headers: headers,
         body: JSON.stringify(body),
         signal: signal || undefined,
-    });
+    }, signal);
 
     if (!res.ok) {
         let providerBody = '';
