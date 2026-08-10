@@ -429,6 +429,17 @@ test('planReconciliation re-reads the passes the message ids point at', () => {
     assert.deepEqual(plan.dropped, []);
 });
 
+test('planReconciliation maps quoted chat ids through the extracted-message list', () => {
+    // Extraction skipped 9 system messages, so chat id 18 is array index 9 —
+    // pass 0, not the pass 1 a raw id comparison would pick.
+    const messages = Array.from({ length: 30 }, (_, i) => ({ id: i * 2 }));
+    const plan = planReconciliation(
+        ledgerWithPasses([{ question: 'q', messageIds: [18], raisedInPass: 2, resolved: false }]),
+        { reconcileTokens: 5000, messages },
+    );
+    assert.deepEqual(plan.passIndices, [0]);
+});
+
 test('planReconciliation falls back to the raising pass and the one before it', () => {
     const plan = planReconciliation(
         ledgerWithPasses([{ question: 'q', messageIds: [], raisedInPass: 2, resolved: false }]),

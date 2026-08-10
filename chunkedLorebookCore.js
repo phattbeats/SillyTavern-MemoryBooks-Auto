@@ -669,7 +669,7 @@ export function parseReconcileReply(reply, cfg = {}) {
  * @param {object} opts reconcileTokens, plus overheadTokens already committed
  * @returns {{passIndices:number[], items:Array<object>, dropped:Array<object>, tokens:number}}
  */
-export function planReconciliation(ledger, { reconcileTokens = 0, overheadTokens = 0 } = {}) {
+export function planReconciliation(ledger, { reconcileTokens = 0, overheadTokens = 0, messages = null } = {}) {
     const passes = Array.isArray(ledger?.passes) ? ledger.passes : [];
     const open = (Array.isArray(ledger?.unresolved) ? ledger.unresolved : []).filter(u => !u.resolved);
     if (!open.length || !passes.length) {
@@ -677,7 +677,20 @@ export function planReconciliation(ledger, { reconcileTokens = 0, overheadTokens
     }
 
     const byIndex = new Map(passes.map(p => [p.index, p]));
-    const passForMessage = (id) => passes.find(p => id >= p.start && id <= p.end)?.index;
+    // `p.start`/`p.end` are indices into the extracted-message list, but the
+    // model quotes the chat id printed by formatAuditMessage. Those diverge as
+    // soon as extraction skips a system or blank message, so map back first.
+    const indexById = new Map();
+    if (Array.isArray(messages)) {
+        messages.forEach((m, i) => {
+            if (m?.id != null && !indexById.has(m.id)) indexById.set(m.id, i);
+        });
+    }
+    const passForMessage = (id) => {
+        const idx = indexById.size ? indexById.get(id) : id;
+        if (idx == null) return undefined;
+        return passes.find(p => idx >= p.start && idx <= p.end)?.index;
+    };
 
     // Which passes does each question need? Explicit message ids first; failing
     // that, the pass that raised it and the pass that first established the

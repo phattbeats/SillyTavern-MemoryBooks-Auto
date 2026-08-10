@@ -278,7 +278,10 @@ export function parseOneShotEntries(reply, cfg = {}) {
             selectiveLogic: clampInt(item.selectiveLogic, SELECTIVE_LOGIC.AND_ANY, 0, 3),
             constant: item.constant === true,
             order: clampInt(item.order, ONE_SHOT_DEFAULTS.order, 0, 10000),
-            position: [0, 1, 2, 3, 4].includes(Number(item.position))
+            // Number(null) and Number('') are both 0, which would silently mean
+            // BEFORE_CHAR — an omitted position must fall through to the default.
+            position: item.position != null && item.position !== ''
+                && [0, 1, 2, 3, 4].includes(Number(item.position))
                 ? Number(item.position)
                 : INSERTION_POSITION.AFTER_CHAR,
             scanDepth: clampInt(item.scanDepth, 3, 1, 100),
@@ -412,6 +415,11 @@ export function enforceGlobalKeywordUniqueness(entries, claimedByExisting = new 
             } else {
                 entry.keywordless = true;
             }
+        } else {
+            // The same entry can pass through here once per chunked pass. A
+            // stale flag from an earlier pass would force constant:false on an
+            // entry that has since won a keyword.
+            delete entry.keywordless;
         }
 
         // keysecondary is a filter, not a trigger, so it does not collide the

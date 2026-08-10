@@ -259,6 +259,7 @@ export async function runChunkedLorebook({ lorebook, plan, onProgress, generate 
     const recon = planReconciliation(ledger, {
         reconcileTokens: chunkedBudget.reconcileTokens,
         overheadTokens: overhead,
+        messages,
     });
     if (recon.dropped.length) {
         console.info(`${LOG}: ${recon.dropped.length} open question(s) could not be re-read within the ~${chunkedBudget.reconcileTokens}-token reconciliation budget; their entries will be flagged degraded.`, recon.dropped);
