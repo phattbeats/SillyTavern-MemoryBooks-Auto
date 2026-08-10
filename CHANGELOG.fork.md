@@ -17,6 +17,28 @@ Fork home: https://github.com/phattbeats/SillyTavern-MemoryBooks-Auto.
 > contents and is preserved for audit purposes.
 
 
+## v0.0.24 (2026-08-10) — release: PHA-1878 one-shot lorebook generation, ready to test
+
+Rollup test build for [PHA-1878](/PHA/issues/PHA-1878). No new feature work —
+this cuts a version so the whole one-shot line can be installed and exercised
+against a real story. Everything below already landed on `main` across PRs
+#26 / #27 / #28:
+
+- **PHA-1862** — keywords deduped across the *whole* book, not just within one
+  response; the audit walk sized from the model's real context window.
+- **PHA-1871** — a story that fits the effective budget produces its entire
+  entry set in one call, with the existing lorebook in context.
+- **PHA-1870** — scene-memory chunks sized from the context window, and the
+  `tokenWarningThreshold` gate resizes an oversized chunk instead of aborting
+  it; preset context slider read on non-OpenAI backends too.
+- **PHA-1879** — the chunked fallback carries an entity/unresolved-reference
+  ledger between passes and closes with a reconciliation pass.
+- **Review fixes** (`ac6e452`) — reconciliation id mapping, stale `keywordless`
+  flag, and `position` coercion.
+
+Verified before cutting: 929 unit tests + 186 eval tests green, `index.build.js`
+byte-identical to a fresh `bun run build.ts`.
+
 ## v0.0.23 (2026-08-09) — feat: the chunked fallback carries a ledger between passes and reconciles at the end
 
 Closes [PHA-1879](/PHA/issues/PHA-1879). v0.0.21 made the *one-shot* path good.
