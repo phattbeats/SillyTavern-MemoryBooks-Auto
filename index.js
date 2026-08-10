@@ -75,27 +75,25 @@ import {
   handleAuditCommand,
   handleStmbcStopCommand,
   runAuditInline,
-  getAuditNotes,
-  resolveAuditConfig,
 } from "./auditor.js";
 // STMBC-HOOK(auditor-jobs): coverage audit + entry regeneration over the walker's
 // running notes (fork; plan §4.3 jobs 1–2).
 import {
   handleCoverageCommand,
   handleRegenCommand,
-  resolveCoverageConfig,
-  resolveRegenConfig,
   loadBoundLorebook,
-  entriesForCoverage,
-  resolveJobsConnection,
-  bulkGenerate,
 } from "./auditorJobs.js";
-import { auditCoverage, buildCoverageIndex } from "./auditorJobsCore.js";
 // STMBC-HOOK(one-shot): PHA-1871 — when the whole story fits in the model's
 // context window, /stmb-auto replaces the audit walk + per-entity coverage loop
 // with a single call that emits the complete entry set, so keywords are assigned
 // globally and non-overlapping by construction instead of deduped after the fact.
 import { planOneShotRun, runOneShotLorebook } from "./oneShotLorebook.js";
+// STMBC-HOOK(chunked-lorebook): PHA-1879 — the fallback for stories that do NOT
+// fit. Same entry set, written by N passes that carry an entity registry and an
+// unresolved-reference ledger between them, closed by a reconciliation pass, and
+// flagged where a cross-reference could not be closed. Replaces the old
+// coverage + per-entity bulkGenerate loop, whose passes were blind to each other.
+import { planChunkedRun, runChunkedLorebook } from "./chunkedLorebook.js";
 // STMBC-HOOK(stmb-auto): PHA-1846 — the zero-argument "just run it" orchestrator.
 // Pure chunk-planning/summary logic lives in stmbAutoCore.js (DI, node:test).
 import {
@@ -1999,14 +1997,13 @@ async function runStmbAutoPipeline(jobContext) {
     }
   }
 
-  // Step 4: coverage-driven, headless generation of character/location entries
-  // from the audit notes. minChunks is relaxed to stmbAutoCfg.coverageMinChunks
-  // (default 1, not the coverage job's own default of 2) — that gate is
-  // mathematically unsatisfiable on any chat small enough to fit in one audit
-  // chunk, and a from-scratch full-story run must still surface those names.
+  // Step 4: the lorebook itself. Both shapes write the COMPLETE entry set with
+  // globally-unique keywords; they differ only in how much of the story one call
+  // can see. One-shot when it all fits (PHA-1871), otherwise the ledgered
+  // chunked path (PHA-1879) — never the old per-entity loop, whose calls were
+  // blind to each other and left the collisions for post-hoc dedup to filter.
   let loreMessage = "";
   let loreGenerated = 0;
-  const auditNotes = useOneShot ? null : getAuditNotes();
 
   if (useOneShot) {
     // Step 4 (one-shot): the whole entry set from a single call, written with
@@ -2036,18 +2033,20 @@ async function runStmbAutoPipeline(jobContext) {
       console.error("STMemoryBooks: /stmb-auto one-shot step failed:", error);
       loreMessage = `One-shot lorebook step failed: ${error?.message || error}`;
     }
-  } else if (auditNotes) {
+  } else {
+    // Step 4 (chunked fallback): the story does not fit, so it is read in the
+    // FEWEST passes that do — cut at scene boundaries wherever possible, since
+    // every mid-scene cut manufactures a dangling reference. A ledger of the
+    // entities established so far and the keywords each has been AWARDED
+    // travels with every pass, so overlap is prevented at write time rather
+    // than string-filtered afterwards; open cross-references are recorded, not
+    // guessed at, and a reconciliation pass re-reads only the slices they point
+    // at. Whatever it still cannot close is flagged on the entry.
     try {
       const lorebook = await loadBoundLorebook();
-      if (lorebook) {
-        const coverageCfg = resolveCoverageConfig(autoModule, chat_metadata);
-        coverageCfg.minChunks = stmbAutoCfg.coverageMinChunks;
-        const regenCfg = resolveRegenConfig(autoModule, chat_metadata);
-        const auditCfg = resolveAuditConfig(autoModule, chat_metadata);
-        const entries = entriesForCoverage(lorebook.data);
-        const report = auditCoverage(auditNotes, entries, coverageCfg);
-        const coverageIndex = buildCoverageIndex(entries);
-
+      if (!lorebook) {
+        loreMessage = "Could not load the bound lorebook for the chunked lorebook step.";
+      } else {
         try {
           // STMBC-HOOK(catalog): keep the librarian catalog fresh, same as a
           // manual /stmbc-coverage run — never fatal to the auto run.
@@ -2056,25 +2055,39 @@ async function runStmbAutoPipeline(jobContext) {
           console.warn("STMemoryBooks: /stmb-auto catalog refresh failed (non-fatal):", error);
         }
 
-        const targets = [...report.missing, ...report.thin];
-        if (targets.length) {
-          const conn = resolveJobsConnection(regenCfg.profile);
+        const chunkedPlan = planChunkedRun({
+          autoModule,
+          chatMetadata: chat_metadata,
+          chatArray: chat,
+          oneShotPlan,
+        });
+        if (!chunkedPlan.ok) {
+          loreMessage = `Chunked lorebook step skipped: ${chunkedPlan.reason}`;
+        } else {
           reportPhase(
-            __st_t_tag`STMB Auto: generating ${targets.length} character/location entr${targets.length === 1 ? "y" : "ies"}…`,
+            __st_t_tag`STMB Auto: writing the lorebook in ${chunkedPlan.passes.length} pass${chunkedPlan.passes.length === 1 ? "" : "es"}…`,
           );
-          loreMessage = await bulkGenerate(
-            targets,
-            { notes: auditNotes, lorebook, coverageIndex, regenCfg, auditCfg, conn },
-            stmbAutoCfg.bulkGenerateCap,
-          );
-          loreGenerated = targets.length;
+          const result = await runChunkedLorebook({
+            lorebook,
+            plan: chunkedPlan,
+            onProgress: (msg) => jobContext?.setDetail(msg),
+          });
+          loreMessage = result.message;
+          loreGenerated = result.created + result.updated;
+          if (result.collisions.length) {
+            console.info("STMemoryBooks: /stmb-auto resolved keyword collisions:", result.collisions);
+          }
+          if (result.unresolved.length) {
+            console.info(
+              "STMemoryBooks: /stmb-auto left cross-references unresolved (raise the context window and re-run):",
+              result.unresolved,
+            );
+          }
         }
-      } else {
-        loreMessage = "Could not load the bound lorebook for the coverage step.";
       }
     } catch (error) {
-      console.error("STMemoryBooks: /stmb-auto coverage step failed:", error);
-      loreMessage = `Coverage step failed: ${error?.message || error}`;
+      console.error("STMemoryBooks: /stmb-auto chunked lorebook step failed:", error);
+      loreMessage = `Chunked lorebook step failed: ${error?.message || error}`;
     }
   }
 
