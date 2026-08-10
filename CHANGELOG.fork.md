@@ -17,6 +17,55 @@ Fork home: https://github.com/phattbeats/SillyTavern-MemoryBooks-Auto.
 > contents and is preserved for audit purposes.
 
 
+## v0.0.21 (2026-08-09) — feat: one-shot whole-story lorebook generation when the story fits the context window
+
+Closes [PHA-1871](/PHA/issues/PHA-1871). The payoff of
+[PHA-1862](/PHA/issues/PHA-1862), and the structural fix for cross-entry
+keyword overlap.
+
+A `/stmb-auto` run used to be `ceil(N/chunk)` audit calls plus up to
+`bulkGenerateCap` per-entity derivation calls, none of which shared any state.
+No call ever saw the whole entry set, so consistent keyword assignment was
+structurally impossible — `addlore.js dedupeAgainstExistingEntries` only
+filtered the symptom afterwards, and only on the scene-memory path.
+
+v0.0.20 added `contextBudget.js` but only the audit walk read it. Now
+`/stmb-auto` asks `fitsInOneCall()` up front:
+
+- **When the whole transcript fits**, the audit walk *and* the per-entity
+  coverage loop are both skipped. One call receives the full transcript plus
+  the full existing lorebook and emits the COMPLETE entry set together.
+- **When it does not fit** (small model, or a story that outgrew the window),
+  the chunked path runs exactly as before. `dedupeAgainstExistingEntries` stays
+  in place as the net for that path.
+
+Two things make the keywords actually non-overlapping rather than merely
+requested:
+
+1. **The prompt now says exactly what a good entry looks like.** It documents
+   the real World Info field semantics from the current SillyTavern docs —
+   `key` vs `keysecondary`, `selectiveLogic` (0 AND ANY / 1 NOT ALL / 2 NOT ANY
+   / 3 AND ALL), `constant` vs keyword-triggered, `order` (lower inserts
+   *earlier*), `position`, `scanDepth`, `preventRecursion` — instead of asking
+   for a bag of keywords and hoping.
+2. **`enforceGlobalKeywordUniqueness` makes it a guarantee.** Any keyword wanted
+   by two entries is awarded to exactly one, deterministically: the entry whose
+   title *is* the keyword, else the entry whose title contains it as a whole
+   word, else first emitted. Keywords already claimed by an untouched existing
+   entry (including scene memories, which this pass never rewrites) are stripped
+   from every new entry — the incumbent keeps them. An entry left with nothing
+   is flagged and forced non-`constant` rather than shipped colliding.
+
+The one-shot pass runs *after* the scene-memory step so it yields to the
+keywords those entries just claimed. New files: `oneShotLorebookCore.js` (pure,
+DI, unit-tested) and `oneShotLorebook.js` (runtime binding), mirroring the
+`auditorCore.js` ↔ `auditor.js` split.
+
+Configurable under `autoModule.oneShot` (global) or `chat_metadata.stmbc.oneShot`
+(per-chat): `enabled`, `maxEntries`, `minContentChars`, `truncate`, `profile`,
+`prompt`. Set `enabled: false` to always take the chunked path.
+
+
 ## v0.0.16 (2026-08-09) — fix: existing installs were still stuck at the old Max Response Tokens default after v0.0.15
 
 Closes [PHA-1846](/PHA/issues/PHA-1846). v0.0.15 changed `DEFAULT_MAX_TOKENS`

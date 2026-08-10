@@ -90,6 +90,11 @@ import {
   bulkGenerate,
 } from "./auditorJobs.js";
 import { auditCoverage, buildCoverageIndex } from "./auditorJobsCore.js";
+// STMBC-HOOK(one-shot): PHA-1871 — when the whole story fits in the model's
+// context window, /stmb-auto replaces the audit walk + per-entity coverage loop
+// with a single call that emits the complete entry set, so keywords are assigned
+// globally and non-overlapping by construction instead of deduped after the fact.
+import { planOneShotRun, runOneShotLorebook } from "./oneShotLorebook.js";
 // STMBC-HOOK(stmb-auto): PHA-1846 — the zero-argument "just run it" orchestrator.
 // Pure chunk-planning/summary logic lives in stmbAutoCore.js (DI, node:test).
 import {
@@ -1814,16 +1819,35 @@ async function runStmbAutoPipeline(jobContext) {
     lorebookCreated = true;
   }
 
+  // PHA-1871: decide the shape of the run BEFORE doing any work. When the whole
+  // transcript fits in the model's context window, steps 2 and 4 (the audit walk
+  // and the per-entity coverage loop) are both replaced by ONE call that sees
+  // every entry at once — the only way keyword assignment can be globally
+  // consistent. Otherwise fall back to the chunked path, unchanged.
+  let oneShotPlan = null;
+  try {
+    oneShotPlan = planOneShotRun({ autoModule, chatMetadata: chat_metadata, chatArray: chat });
+  } catch (error) {
+    console.warn("STMemoryBooks: /stmb-auto one-shot planning failed, using the chunked path:", error);
+    oneShotPlan = null;
+  }
+  const useOneShot = oneShotPlan?.oneShot === true;
+
   // Step 2: full-chat audit walk — the character/location/event ground truth
   // that step 4's coverage scan reads from. Resumes any existing checkpoint
-  // rather than restarting, same default as a bare /stmbc-audit.
-  reportPhase(translate("STMB Auto: reading the whole story…", "STMemoryBooks_AutoAuditing"));
+  // rather than restarting, same default as a bare /stmbc-audit. Skipped whole
+  // on the one-shot path — nothing downstream reads the notes there.
   let auditMessage = "";
-  try {
-    auditMessage = await runAuditInline(false);
-  } catch (error) {
-    console.error("STMemoryBooks: /stmb-auto audit step failed:", error);
-    auditMessage = `Audit step failed: ${error?.message || error}`;
+  if (useOneShot) {
+    auditMessage = `Skipped the chunked audit walk — ${oneShotPlan.reason}.`;
+  } else {
+    reportPhase(translate("STMB Auto: reading the whole story…", "STMemoryBooks_AutoAuditing"));
+    try {
+      auditMessage = await runAuditInline(false);
+    } catch (error) {
+      console.error("STMemoryBooks: /stmb-auto audit step failed:", error);
+      auditMessage = `Audit step failed: ${error?.message || error}`;
+    }
   }
 
   // Step 3: chunked scene memories for everything not yet summarized.
@@ -1885,8 +1909,37 @@ async function runStmbAutoPipeline(jobContext) {
   // chunk, and a from-scratch full-story run must still surface those names.
   let loreMessage = "";
   let loreGenerated = 0;
-  const auditNotes = getAuditNotes();
-  if (auditNotes) {
+  const auditNotes = useOneShot ? null : getAuditNotes();
+
+  if (useOneShot) {
+    // Step 4 (one-shot): the whole entry set from a single call, written with
+    // globally-unique keywords. Runs AFTER the scene memories so those entries'
+    // keywords are already in the book and this pass yields to them rather than
+    // colliding with them — post-hoc dedup is a net here, not the mechanism.
+    try {
+      const lorebook = await loadBoundLorebook();
+      if (!lorebook) {
+        loreMessage = "Could not load the bound lorebook for the one-shot step.";
+      } else {
+        reportPhase(
+          translate("STMB Auto: writing the whole lorebook in one pass…", "STMemoryBooks_AutoOneShot"),
+        );
+        const result = await runOneShotLorebook({
+          lorebook,
+          plan: oneShotPlan,
+          onProgress: (msg) => jobContext?.setDetail(msg),
+        });
+        loreMessage = result.message;
+        loreGenerated = result.created + result.updated;
+        if (result.collisions.length) {
+          console.info("STMemoryBooks: /stmb-auto resolved keyword collisions:", result.collisions);
+        }
+      }
+    } catch (error) {
+      console.error("STMemoryBooks: /stmb-auto one-shot step failed:", error);
+      loreMessage = `One-shot lorebook step failed: ${error?.message || error}`;
+    }
+  } else if (auditNotes) {
     try {
       const lorebook = await loadBoundLorebook();
       if (lorebook) {
