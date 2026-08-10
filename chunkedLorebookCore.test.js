@@ -318,7 +318,7 @@ test('formatPassTranscript renders only the pass range', () => {
 });
 
 test('formatDraftEntries and formatQuestions handle the empty case', () => {
-    assert.match(formatDraftEntries([]), /no entries/);
+    assert.match(formatDraftEntries([]).text, /no entries/);
     assert.equal(formatQuestions([]), '(none)');
     assert.match(formatQuestions([{ question: 'why?', about: 'Mira', messageIds: [3] }]), /1\. why\? \[about: Mira\] \[raised by messages 3\]/);
 });
@@ -511,11 +511,42 @@ test('applyReconciliation refuses to close a question it never asked', () => {
 
 // -------------------------------------------------------------- degradation
 
+// PHA-1886 §2: uncapped, the draft render is charged as reconciliation overhead
+// and can consume the whole budget on the small windows that produced the run.
+test('formatDraftEntries degrades to excerpts and then to titles under a cap', () => {
+    const long = (t) => entry({ title: t, content: 'z'.repeat(2000) });
+    const draft = [long('Mira'), long('Kell'), long('Ashfall')];
+
+    const full = formatDraftEntries(draft);
+    assert.equal(full.truncated, false);
+
+    const excerpt = formatDraftEntries(draft, 400);
+    assert.equal(excerpt.truncated, 'excerpt');
+    assert.ok(excerpt.tokens < full.tokens);
+    assert.ok(excerpt.text.includes('Mira') && excerpt.text.includes('Ashfall'));
+
+    const titles = formatDraftEntries(draft, 30);
+    assert.equal(titles.truncated, 'titles-only');
+    assert.ok(!titles.text.includes('zzz'));
+    assert.ok(titles.text.includes('Mira') && titles.text.includes('Ashfall'));
+});
+
 test('markDegradedEntries records the pass count on every entry', () => {
     const { entries, degraded } = markDegradedEntries([entry({ title: 'Mira' })], [], 7);
     assert.equal(entries[0].stmbAutoPasses, 7);
     assert.equal(entries[0].stmbAutoDegraded, undefined);
     assert.equal(degraded, 0);
+});
+
+// PHA-1886 §6: substring matching flagged "Ash" for a question about "ashes".
+test('markDegradedEntries matches the entry name as a whole word, not a substring', () => {
+    const open = [{ question: 'who scattered the ashes?', about: '', resolved: false }];
+    const { entries, degraded } = markDegradedEntries([entry({ title: 'Ash' })], open, 3);
+    assert.equal(degraded, 0);
+    assert.equal(entries[0].stmbAutoDegraded, undefined);
+
+    const named = markDegradedEntries([entry({ title: 'Ash' })], [{ question: 'who is Ash?', about: '', resolved: false }], 3);
+    assert.equal(named.degraded, 1);
 });
 
 test('markDegradedEntries flags entries an open question names', () => {

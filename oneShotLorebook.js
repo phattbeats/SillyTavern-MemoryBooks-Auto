@@ -28,6 +28,7 @@ import {
     ONE_SHOT_PROMPT,
     buildOneShotPrompt,
     collectClaimedKeywords,
+    dropMemoryTitleCollisions,
     enforceGlobalKeywordUniqueness,
     formatExistingEntries,
     formatTranscript,
@@ -160,15 +161,25 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
         return { ok: false, message: 'The model returned no usable entry set for the one-shot pass.', created: 0, updated: 0, collisions: [], entries: [] };
     }
 
+    // A model that echoes a scene-memory title back would have its lore written
+    // straight over the chronological record — the upsert matches on comment.
+    const guarded = dropMemoryTitleCollisions(parsed.entries, existing);
+    if (guarded.skipped.length) {
+        console.warn(`${LOG}: skipped ${guarded.skipped.length} entr${guarded.skipped.length === 1 ? 'y' : 'ies'} whose title collides with a scene memory:`, guarded.skipped);
+    }
+    if (!guarded.entries.length) {
+        return { ok: false, message: 'Every generated entry collided with an existing scene memory; nothing was written.', created: 0, updated: 0, collisions: [], entries: [] };
+    }
+
     // Titles this run is rewriting release their old keywords back into the pool;
     // every other existing entry keeps its claims.
-    const rewritten = new Set(parsed.entries.map(e => e.title.trim().toLowerCase()));
+    const rewritten = new Set(guarded.entries.map(e => e.title.trim().toLowerCase()));
     const claimedByExisting = collectClaimedKeywords(lorePool, rewritten);
     // Scene memories keep their keywords unconditionally — this pass never
     // rewrites them, so stealing their keys would silently break retrieval.
     for (const k of collectClaimedKeywords(existing.filter(e => e.isMemory))) claimedByExisting.add(k);
 
-    const { entries, collisions } = enforceGlobalKeywordUniqueness(parsed.entries, claimedByExisting);
+    const { entries, collisions } = enforceGlobalKeywordUniqueness(guarded.entries, claimedByExisting);
 
     let created = 0;
     let updated = 0;
@@ -214,7 +225,7 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
         }
     }
 
-    let message = summarizeOneShot({ created, updated, dropped: parsed.dropped, collisions, keywordless });
+    let message = summarizeOneShot({ created, updated, dropped: parsed.dropped + guarded.skipped.length, collisions, keywordless });
     if (failures.length) message += ` · ${failures.length} write failure${failures.length === 1 ? '' : 's'}: ${failures.slice(0, 3).join('; ')}`;
 
     return { ok: created + updated > 0, message, created, updated, collisions, entries };

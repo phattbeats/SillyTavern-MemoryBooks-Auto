@@ -14,6 +14,8 @@ import {
     SELECTIVE_LOGIC,
     buildOneShotPrompt,
     collectClaimedKeywords,
+    containsWholeWord,
+    dropMemoryTitleCollisions,
     enforceGlobalKeywordUniqueness,
     findKeywordCollisions,
     formatExistingEntries,
@@ -21,6 +23,7 @@ import {
     generateOneShotEntries,
     normalizeKeyword,
     parseOneShotEntries,
+    salvageEntryObjects,
     summarizeOneShot,
 } from './oneShotLorebookCore.js';
 
@@ -183,11 +186,84 @@ test('the existing book always wins — an incumbent keyword is stripped from ev
     assert.equal(collisions[0].winner, '(existing lorebook entry)');
 });
 
-test('an entry stripped bare is marked keywordless rather than silently colliding', () => {
+// PHA-1886 §4: `key: []` ships an entry nothing can retrieve unless the user
+// happens to have Vector Storage wired into World Info, so a disambiguated form
+// is tried before giving up.
+test('an entry whose every keyword AND title is taken falls back to a disambiguated key', () => {
     const claimed = collectClaimedKeywords([{ title: 'incumbent', keys: ['ghost', 'Ada'] }]);
+    const { entries } = enforceGlobalKeywordUniqueness([entry({ title: 'Ada', key: ['ghost'] })], claimed);
+    assert.deepEqual(entries[0].key, ['Ada (character)']);
+    assert.equal(entries[0].keywordless, undefined);
+});
+
+test('two entries contesting the same title get distinct disambiguated keys', () => {
+    const claimed = collectClaimedKeywords([{ title: 'incumbent', keys: ['ghost', 'Ada', 'Ada (character)'] }]);
+    const { entries } = enforceGlobalKeywordUniqueness([
+        entry({ title: 'Ada', key: ['ghost'] }),
+        entry({ title: 'Ada', key: ['ghost'] }),
+    ], claimed);
+    assert.deepEqual(entries[0].key, ['Ada (character 2)']);
+    assert.deepEqual(entries[1].key, ['Ada (character 3)']);
+    assert.notDeepEqual(entries[0].key, entries[1].key);
+});
+
+test('an entry is only marked keywordless when even the disambiguated forms are taken', () => {
+    const taken = ['ghost', 'Ada', 'Ada (character)'];
+    for (let n = 2; n <= 9; n++) taken.push(`Ada (character ${n})`);
+    const claimed = collectClaimedKeywords([{ title: 'incumbent', keys: taken }]);
     const { entries } = enforceGlobalKeywordUniqueness([entry({ title: 'Ada', key: ['ghost'] })], claimed);
     assert.deepEqual(entries[0].key, []);
     assert.equal(entries[0].keywordless, true);
+});
+
+test('containsWholeWord does not match a word inside a longer word', () => {
+    assert.equal(containsWholeWord('who scattered the ashes?', 'ash'), false);
+    assert.equal(containsWholeWord('who took the ash?', 'ash'), true);
+    assert.equal(containsWholeWord('a.b matters', 'a.b'), true);
+    assert.equal(containsWholeWord('axb matters', 'a.b'), false);
+});
+
+// PHA-1886 §5
+test('dropMemoryTitleCollisions removes entries that would overwrite a scene memory', () => {
+    const existing = [
+        { title: 'Scene 1-20', isMemory: true },
+        { title: 'Mira', isMemory: false },
+    ];
+    const { entries, skipped } = dropMemoryTitleCollisions(
+        [entry({ title: 'scene 1-20' }), entry({ title: 'Mira' })],
+        existing,
+    );
+    assert.deepEqual(entries.map(e => e.title), ['Mira']);
+    assert.deepEqual(skipped, ['scene 1-20']);
+});
+
+test('dropMemoryTitleCollisions is a no-op when the book has no scene memories', () => {
+    const input = [entry({ title: 'Mira' })];
+    const { entries, skipped } = dropMemoryTitleCollisions(input, [{ title: 'Mira', isMemory: false }]);
+    assert.equal(entries.length, 1);
+    assert.deepEqual(skipped, []);
+});
+
+// PHA-1886 §3
+test('salvageEntryObjects recovers the complete entries from a truncated reply', () => {
+    const truncated = '{"entries": [' +
+        '{"title": "Mira", "content": "Mira is a } brace inside a string", "key": ["Mira"]},' +
+        '{"title": "Kell", "content": "Kell guards the gate.", "key": ["Kell"]},' +
+        '{"title": "Ashfa';
+    const got = salvageEntryObjects(truncated);
+    assert.deepEqual(got.map(e => e.title), ['Mira', 'Kell']);
+});
+
+test('parseOneShotEntries salvages a max_tokens-truncated reply instead of losing everything', () => {
+    const body = (t) => `{"title": "${t}", "kind": "character", "content": "${'a'.repeat(60)}", "key": ["${t}"]}`;
+    const truncated = `{"entries": [${body('Mira')}, ${body('Kell')}, {"title": "Ashfa`;
+    const parsed = parseOneShotEntries(truncated);
+    assert.ok(parsed, 'a truncated reply must not parse as null');
+    assert.deepEqual(parsed.entries.map(e => e.title), ['Mira', 'Kell']);
+});
+
+test('salvage does not fire when the reply is simply not JSON', () => {
+    assert.equal(parseOneShotEntries('I cannot help with that.'), null);
 });
 
 test('regex keys are passed through untouched — they are not text keywords', () => {

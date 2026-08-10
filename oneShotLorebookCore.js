@@ -213,7 +213,55 @@ const clampInt = (v, fallback, min, max) => {
     return Math.min(max, Math.max(min, Math.round(n)));
 };
 
-/** Strip a ```json fence and any prose around the JSON object, like parseAuditNotes. */
+/**
+ * Salvage the complete entry objects out of a reply whose JSON was cut off by
+ * the output token cap (PHA-1886 §3).
+ *
+ * A `max_tokens`-truncated reply has no closing brace for the last object, so
+ * `lastIndexOf('}')` produces invalid JSON and the retry — same prompt, same
+ * cap — truncates in exactly the same place. Rather than losing 50 good entries
+ * because the 51st is half-written, walk the text and take every top-level
+ * `{...}` that IS balanced, string- and escape-aware so a `}` inside content
+ * does not close an object early.
+ *
+ * @returns {Array<object>} parsed objects, possibly empty
+ */
+export function salvageEntryObjects(text) {
+    const s = typeof text === 'string' ? text : '';
+    const out = [];
+    const stack = [];       // start offsets of currently open objects
+    let inString = false;
+    let escaped = false;
+
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (ch === '\\') escaped = true;
+            else if (ch === '"') inString = false;
+            continue;
+        }
+        if (ch === '"') { inString = true; continue; }
+        if (ch === '{') { stack.push(i); continue; }
+        if (ch !== '}') continue;
+        const start = stack.pop();
+        if (start == null) continue;                 // stray brace in prose
+        // Entries sit either at the top level (a bare array reply) or one level
+        // inside the `{"entries": [...]}` wrapper — whose own brace never closes
+        // in a truncated reply. Anything deeper is a nested value, not an entry.
+        if (stack.length > 1) continue;
+        try {
+            const obj = JSON.parse(s.slice(start, i + 1));
+            if (obj && typeof obj === 'object' && !Array.isArray(obj) && typeof obj.title === 'string') out.push(obj);
+        } catch { /* not a complete object */ }
+    }
+    return out;
+}
+
+/**
+ * Strip a ```json fence and any prose around the JSON object, like parseAuditNotes.
+ * Falls back to per-object salvage when the reply was truncated mid-JSON.
+ */
 function extractJsonObject(reply) {
     if (typeof reply !== 'string') return null;
     let s = reply.trim();
@@ -223,8 +271,11 @@ function extractJsonObject(reply) {
     try { return JSON.parse(s); } catch { /* try to carve the object out of surrounding prose */ }
     const start = s.indexOf('{');
     const end = s.lastIndexOf('}');
-    if (start < 0 || end <= start) return null;
-    try { return JSON.parse(s.slice(start, end + 1)); } catch { return null; }
+    if (start >= 0 && end > start) {
+        try { return JSON.parse(s.slice(start, end + 1)); } catch { /* truncated — salvage below */ }
+    }
+    const salvaged = salvageEntryObjects(s);
+    return salvaged.length ? { entries: salvaged, stmbAutoSalvaged: true } : null;
 }
 
 /**
@@ -304,6 +355,19 @@ export function normalizeKeyword(k) {
     return String(k ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+/**
+ * Whole-word containment, on already-normalized text. Shared so keyword awards
+ * and degraded-entry marking agree on what "names this entry" means — a
+ * substring test flags "Ash" for a question about "ashes" (PHA-1886 §6).
+ */
+export function containsWholeWord(haystack, needle) {
+    const h = String(haystack ?? '');
+    const n = String(needle ?? '');
+    if (!h || !n) return false;
+    const escaped = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|\\W)${escaped}(\\W|$)`).test(h);
+}
+
 /** Is this key a regex literal (`/.../flags`)? Those are never deduped by text. */
 function isRegexKey(k) {
     return /^\/.*\/[a-z]*$/i.test(String(k ?? '').trim());
@@ -365,10 +429,7 @@ export function enforceGlobalKeywordUniqueness(entries, claimedByExisting = new 
         }
     });
 
-    const wholeWord = (haystack, needle) => {
-        const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        return new RegExp(`(^|\\W)${escaped}(\\W|$)`).test(haystack);
-    };
+    const wholeWord = containsWholeWord;
 
     const awarded = new Map();      // normalized keyword -> winning idx (or -1 = nobody)
     const collisions = [];
@@ -408,10 +469,25 @@ export function enforceGlobalKeywordUniqueness(entries, claimedByExisting = new 
         entry.key = Array.from(new Set(kept));
 
         if (entry.key.length === 0) {
-            const titleKey = normalizeKeyword(entry.title);
-            if (titleKey && !claimedByExisting.has(titleKey) && !awarded.has(titleKey)) {
-                entry.key = [entry.title.trim()];
-                awarded.set(titleKey, idx);
+            // Every candidate contested and the title taken too used to mean the
+            // entry shipped with `key: []` — unretrievable unless the user has
+            // Vector Storage wired into World Info. Fall through to a
+            // deterministic disambiguated form first (PHA-1886 §4); only a title
+            // that collides even when qualified gives up.
+            const title = String(entry.title ?? '').trim();
+            const kind = String(entry.kind ?? '').trim();
+            const candidates = title ? [title] : [];
+            if (title && kind) candidates.push(`${title} (${kind})`);
+            if (title) for (let n = 2; n <= 9; n++) candidates.push(`${title} (${kind || 'entry'} ${n})`);
+
+            const free = candidates.find((c) => {
+                const n = normalizeKeyword(c);
+                return !!n && !n.includes(',') && !claimedByExisting.has(n) && !awarded.has(n);
+            });
+            if (free) {
+                entry.key = [free];
+                awarded.set(normalizeKeyword(free), idx);
+                delete entry.keywordless;
             } else {
                 entry.keywordless = true;
             }
@@ -431,6 +507,38 @@ export function enforceGlobalKeywordUniqueness(entries, claimedByExisting = new 
     });
 
     return { entries: list, collisions };
+}
+
+/**
+ * Drop generated entries that would overwrite a scene memory (PHA-1886 §5).
+ *
+ * Scene memories are shown to the model tagged `[scene memory — do not rewrite]`,
+ * but `upsertLorebookEntryByTitle` matches on the entry comment: a model that
+ * echoes one of those titles back gets the chronological record replaced with
+ * lore. The premise of this whole path is that instructions are not guarantees,
+ * so make it one at the boundary instead.
+ *
+ * @param {Array<object>} entries generated entries (`title`)
+ * @param {Array<{title:string, isMemory:boolean}>} existing entriesForCoverage output
+ * @returns {{entries:Array<object>, skipped:string[]}}
+ */
+export function dropMemoryTitleCollisions(entries, existing = []) {
+    const protectedTitles = new Set();
+    for (const e of (Array.isArray(existing) ? existing : [])) {
+        if (!e?.isMemory) continue;
+        const n = normalizeKeyword(e.title);
+        if (n) protectedTitles.add(n);
+    }
+    const list = Array.isArray(entries) ? entries : [];
+    if (!protectedTitles.size) return { entries: list, skipped: [] };
+
+    const kept = [];
+    const skipped = [];
+    for (const entry of list) {
+        if (protectedTitles.has(normalizeKeyword(entry?.title))) skipped.push(String(entry?.title ?? ''));
+        else kept.push(entry);
+    }
+    return { entries: kept, skipped };
 }
 
 /**

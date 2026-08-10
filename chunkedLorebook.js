@@ -25,6 +25,7 @@ import {
 } from './contextBudget.js';
 import {
     collectClaimedKeywords,
+    dropMemoryTitleCollisions,
     enforceGlobalKeywordUniqueness,
     formatExistingEntries,
 } from './oneShotLorebookCore.js';
@@ -254,7 +255,17 @@ export async function runChunkedLorebook({ lorebook, plan, onProgress, generate 
     }
 
     // ---- reconciliation
-    const draftText = formatDraftEntries(draft);
+    // PHA-1886 §2: the draft render is the reconciliation prompt's overhead, and
+    // an uncapped render of up to `maxEntries` entries can exceed the whole
+    // reconcile budget on exactly the small windows that produced the chunked
+    // run — every question then gets dropped and every touched entry flagged
+    // degraded. Cap it the way formatLedger already caps the registry.
+    const draftCap = Math.max(200, Math.floor(chunkedBudget.reconcileTokens * 0.35));
+    const drafted = formatDraftEntries(draft, draftCap);
+    const draftText = drafted.text;
+    if (drafted.truncated) {
+        console.info(`${LOG}: draft render shortened to ${drafted.truncated} mode to fit the ~${draftCap}-token reconciliation overhead cap.`);
+    }
     const overhead = estimateTokens(draftText) + estimateTokens(existingText);
     const recon = planReconciliation(ledger, {
         reconcileTokens: chunkedBudget.reconcileTokens,
@@ -304,6 +315,15 @@ export async function runChunkedLorebook({ lorebook, plan, onProgress, generate 
     }
 
     // ---- final award pass, then honest marking
+    // Never let a drafted title overwrite a scene memory: the upsert matches on
+    // comment, so an echoed title would replace the chronological record.
+    const guarded = dropMemoryTitleCollisions(draft, existing);
+    if (guarded.skipped.length) {
+        console.warn(`${LOG}: skipped ${guarded.skipped.length} drafted entr${guarded.skipped.length === 1 ? 'y' : 'ies'} whose title collides with a scene memory:`, guarded.skipped);
+        dropped += guarded.skipped.length;
+    }
+    draft = guarded.entries;
+    if (!draft.length) return fail('Every drafted entry collided with an existing scene memory; nothing was written.');
     const awarded = enforceGlobalKeywordUniqueness(draft, claimsFor(draft));
     const stillOpen = ledger.unresolved.filter(u => !u.resolved);
     const marked = markDegradedEntries(awarded.entries, stillOpen, passes.length);
