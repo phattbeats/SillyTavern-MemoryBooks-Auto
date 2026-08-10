@@ -18,7 +18,7 @@
 // The checkpoint (chunk index + running notes) lives at chat_metadata.stmbc.audit
 // and survives a reload — re-running /stmbc-audit resumes from the saved chunk.
 
-import { extension_settings } from '../../../extensions.js';
+import { extension_settings, getContext as getStContext } from '../../../extensions.js';
 import { chat, chat_metadata } from '../../../../script.js';
 import { saveMetadataForCurrentContext } from './sceneManager.js';
 import { requestCompletion } from './stmemory.js';
@@ -82,6 +82,7 @@ export function resolveAuditConfig(autoModule, chatMetadata) {
             override: autoModule?.contextWindow,
             perChatOverride: chatMetadata?.stmbc?.contextWindow,
             oaiSettings: typeof oai_settings !== 'undefined' ? oai_settings : undefined,
+            getMaxContextSize: () => getStContext()?.maxContext,
         }));
         if (!pinnedCap) cfg.tokenCap = budget.auditTokenCap;
         cfg.mapMaxTokens = budget.outputTokens;

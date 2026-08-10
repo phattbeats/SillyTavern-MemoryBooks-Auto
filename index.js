@@ -14,6 +14,7 @@ import {
 import { Popup, POPUP_TYPE, POPUP_RESULT } from "../../../popup.js";
 import {
   extension_settings,
+  getContext as getStContext,
 } from "../../../extensions.js";
 import { SlashCommandParser } from "../../../slash-commands/SlashCommandParser.js";
 import { SlashCommand } from "../../../slash-commands/SlashCommand.js";
@@ -1403,6 +1404,9 @@ function resolveSceneMemoryBudget() {
         override: autoModule?.contextWindow,
         perChatOverride: chat_metadata?.stmbc?.contextWindow,
         oaiSettings: typeof oai_settings !== "undefined" ? oai_settings : undefined,
+        // Non-chat-completion backends (textgen/kobold/novel) never populate
+        // oai_settings; ST's context object carries their preset context slider.
+        getMaxContextSize: () => getStContext()?.maxContext,
       }),
     );
   } catch (error) {

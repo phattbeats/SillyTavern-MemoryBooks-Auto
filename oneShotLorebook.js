@@ -10,7 +10,7 @@
 // per-entity coverage loop, and every entry in the book is written by a single
 // call that could see all of them at once.
 
-import { extension_settings } from '../../../extensions.js';
+import { extension_settings, getContext as getStContext } from '../../../extensions.js';
 import { chat, chat_metadata } from '../../../../script.js';
 import { oai_settings } from '../../../openai.js';
 import { extractAuditMessages } from './auditorCore.js';
@@ -80,6 +80,7 @@ export function planOneShotRun({ autoModule, chatMetadata, chatArray } = {}) {
         override: autoModule?.contextWindow,
         perChatOverride: meta?.stmbc?.contextWindow,
         oaiSettings: typeof oai_settings !== 'undefined' ? oai_settings : undefined,
+        getMaxContextSize: () => getStContext()?.maxContext,
     }));
 
     if (!cfg.enabled) {
