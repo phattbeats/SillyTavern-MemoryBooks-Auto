@@ -38,6 +38,8 @@ import {
     reviveNotes,
     planChunks,
 } from './auditorCore.js';
+import { resolveContextWindow, planContextBudget } from './contextBudget.js';
+import { oai_settings } from '../../../openai.js';
 
 const LOG = 'STMemoryBooks: Auditor';
 
@@ -67,6 +69,27 @@ export function resolveAuditConfig(autoModule, chatMetadata) {
     }
     if (typeof global.mapPrompt === 'string' && global.mapPrompt.trim()) cfg.mapPrompt = global.mapPrompt;
     if (typeof perChat.mapPrompt === 'string' && perChat.mapPrompt.trim()) cfg.mapPrompt = perChat.mapPrompt;
+
+    // PHA-1862: unless the user pinned these by hand, size the walk to the
+    // model's actual context window instead of the legacy 40-messages/20k-tokens
+    // constants. A 256k model should read the story in a couple of passes, not
+    // twenty — every extra chunk is another call that cannot see what the other
+    // chunks saw, which is the root cause of overlapping lorebook keywords.
+    const pinnedCap = global.tokenCap != null || perChat.tokenCap != null;
+    const pinnedSize = global.chunkSize != null || perChat.chunkSize != null;
+    if (!pinnedCap || !pinnedSize) {
+        const budget = planContextBudget(resolveContextWindow({
+            override: autoModule?.contextWindow,
+            perChatOverride: chatMetadata?.stmbc?.contextWindow,
+            oaiSettings: typeof oai_settings !== 'undefined' ? oai_settings : undefined,
+        }));
+        if (!pinnedCap) cfg.tokenCap = budget.auditTokenCap;
+        cfg.mapMaxTokens = budget.outputTokens;
+        // The message-count cap only exists as a proxy for size; with a real
+        // token budget in hand it must not be the binding constraint.
+        if (!pinnedSize) cfg.chunkSize = Number.MAX_SAFE_INTEGER;
+    }
+    cfg.contextAware = !pinnedCap || !pinnedSize;
     return cfg;
 }
 
@@ -86,8 +109,14 @@ function resolveAuditConnection(cfg) {
     return resolveEffectiveConnectionFromProfile(profile);
 }
 
-/** Single-shot extraction call bound to the resolved connection. */
-function makeMapChunk(conn, systemPrompt) {
+/**
+ * Single-shot extraction call bound to the resolved connection.
+ *
+ * `maxTokens` must scale with the chunk: a context-sized chunk covers far more
+ * of the story than the legacy 40-message one, so an 800-token reply would
+ * truncate the notes JSON mid-object and lose entities silently.
+ */
+function makeMapChunk(conn, systemPrompt, maxTokens = 800) {
     return async (chunkText) => {
         const { text } = await requestCompletion({
             api: conn.api,
@@ -97,7 +126,7 @@ function makeMapChunk(conn, systemPrompt) {
             reverseProxy: conn.reverseProxy,
             prompt: `${systemPrompt}\n\n${chunkText}`,
             temperature: 0,            // deterministic extraction
-            extra: { max_tokens: 800 },
+            extra: { max_tokens: maxTokens },
         });
         return text;
     };
@@ -138,7 +167,7 @@ function buildAuditDeps({ shouldHalt, onProgress, restart }) {
         getMessages: () => extractAuditMessages(chat),
         loadCheckpoint,
         saveCheckpoint,
-        mapChunk: makeMapChunk(conn, systemPrompt),
+        mapChunk: makeMapChunk(conn, systemPrompt, cfg.mapMaxTokens),
         estimateTokens: estimateTokensChars,
         shouldHalt,
         onProgress,
