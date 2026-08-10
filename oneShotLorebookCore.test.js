@@ -1,0 +1,290 @@
+// Copyright (C) 2024–2026 Aiko Hanasaki
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// PHA-1871 — one-shot whole-story lorebook generation, pure core.
+// The acceptance criterion is the last suite: zero cross-entry keyword
+// collisions with post-hoc dedup disabled.
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+    ONE_SHOT_DEFAULTS,
+    ONE_SHOT_PROMPT,
+    SELECTIVE_LOGIC,
+    buildOneShotPrompt,
+    collectClaimedKeywords,
+    enforceGlobalKeywordUniqueness,
+    findKeywordCollisions,
+    formatExistingEntries,
+    formatTranscript,
+    generateOneShotEntries,
+    normalizeKeyword,
+    parseOneShotEntries,
+    summarizeOneShot,
+} from './oneShotLorebookCore.js';
+
+const entry = (over = {}) => ({
+    title: 'X',
+    kind: 'character',
+    key: ['x'],
+    keysecondary: [],
+    selectiveLogic: 0,
+    constant: false,
+    order: 100,
+    position: 1,
+    scanDepth: 3,
+    preventRecursion: true,
+    content: 'x'.repeat(60),
+    ...over,
+});
+
+const reply = (entries) => JSON.stringify({ entries });
+
+// ---------------------------------------------------------------- prompt
+
+test('the prompt spells out the World Info field semantics PHA-1862 asked for', () => {
+    for (const token of ['selectiveLogic', 'keysecondary', 'constant', 'preventRecursion', 'scanDepth', 'position', 'order']) {
+        assert.ok(ONE_SHOT_PROMPT.includes(token), `prompt must document "${token}"`);
+    }
+    // The two semantics that are easy to get backwards.
+    assert.match(ONE_SHOT_PROMPT, /LOWER numbers are inserted EARLIER/);
+    assert.match(ONE_SHOT_PROMPT, /0 = AND ANY/);
+    assert.match(ONE_SHOT_PROMPT, /SELF-CONTAINED/);
+});
+
+test('buildOneShotPrompt fills every token and marks an empty book', () => {
+    const p = buildOneShotPrompt({ transcriptText: 'THE-STORY', existingText: '', maxEntries: 7 });
+    assert.ok(p.includes('THE-STORY'));
+    assert.ok(p.includes('AT MOST 7 entries'));
+    assert.ok(p.includes('brand new lorebook'));
+    assert.ok(!p.includes('{{'), 'no unfilled placeholders');
+});
+
+test('formatTranscript / formatExistingEntries render the two context blocks', () => {
+    const t = formatTranscript([{ id: 3, speaker: 'Ada', rawText: 'hello' }], 0);
+    assert.equal(t, '[3] Ada: hello');
+
+    const e = formatExistingEntries([
+        { title: 'Ada', keys: ['Ada', 'Lovelace'] },
+        { title: 'Scene 1-20', keys: ['ballroom'], isMemory: true },
+        { title: '', keys: ['ignored'] },
+    ]);
+    assert.equal(e, '- Ada: Ada, Lovelace\n- Scene 1-20 [scene memory — do not rewrite]: ballroom');
+    assert.match(formatExistingEntries([]), /brand new lorebook/);
+});
+
+// ---------------------------------------------------------------- parsing
+
+test('parseOneShotEntries accepts a bare object, a fence, and surrounding prose', () => {
+    const body = reply([entry({ title: 'Ada' })]);
+    for (const variant of [body, '```json\n' + body + '\n```', 'Sure!\n' + body + '\nHope that helps.']) {
+        const parsed = parseOneShotEntries(variant);
+        assert.equal(parsed.entries.length, 1, variant.slice(0, 20));
+        assert.equal(parsed.entries[0].title, 'Ada');
+    }
+    assert.equal(parseOneShotEntries('no json here'), null);
+    assert.equal(parseOneShotEntries(reply([])), null);
+});
+
+test('parseOneShotEntries clamps every field into something World Info accepts', () => {
+    const parsed = parseOneShotEntries(reply([entry({
+        title: 'Ada',
+        selectiveLogic: 'AND ANY',   // not a number
+        position: 9,                 // out of range
+        order: -5,
+        scanDepth: 9999,
+        constant: 'yes',             // not a boolean
+        preventRecursion: false,     // must be forced back on
+    })]));
+    const e = parsed.entries[0];
+    assert.equal(e.selectiveLogic, SELECTIVE_LOGIC.AND_ANY);
+    assert.equal(e.position, 1);
+    assert.equal(e.order, 0);
+    assert.equal(e.scanDepth, 100);
+    assert.equal(e.constant, false, 'only a real boolean true makes an entry constant');
+    assert.equal(e.preventRecursion, true, 'always forced on — these entries name each other');
+});
+
+test('parseOneShotEntries drops junk instead of guessing', () => {
+    const parsed = parseOneShotEntries(reply([
+        entry({ title: 'Ada' }),
+        entry({ title: '', content: 'x'.repeat(60) }),  // no title
+        entry({ title: 'Tiny', content: 'too short' }), // below minContentChars
+        entry({ title: 'ada' }),                        // duplicate title, different case
+        'not an object',
+    ]));
+    assert.deepEqual(parsed.entries.map(e => e.title), ['Ada']);
+    assert.equal(parsed.dropped, 4);
+});
+
+test('parseOneShotEntries splits comma-packed keys — ST treats commas as separators', () => {
+    const parsed = parseOneShotEntries(reply([entry({ title: 'Ada', key: ['Ada, Lovelace', ' Countess '] })]));
+    assert.deepEqual(parsed.entries[0].key, ['Ada', 'Lovelace', 'Countess']);
+});
+
+test('parseOneShotEntries falls back to the title when no key survives, and honours maxEntries', () => {
+    const noKey = parseOneShotEntries(reply([entry({ title: 'Ada', key: [] })]));
+    assert.deepEqual(noKey.entries[0].key, ['Ada']);
+
+    const capped = parseOneShotEntries(
+        reply([entry({ title: 'A' }), entry({ title: 'B' }), entry({ title: 'C' })]),
+        { maxEntries: 2 },
+    );
+    assert.equal(capped.entries.length, 2);
+});
+
+// ---------------------------------------------------------------- keyword uniqueness
+
+test('collectClaimedKeywords normalizes and honours the rewrite skip-list', () => {
+    const existing = [
+        { title: 'Ada', keys: ['Ada', '  LOVELACE '] },
+        { title: 'Babbage', keys: ['Babbage'] },
+    ];
+    assert.deepEqual([...collectClaimedKeywords(existing)].sort(), ['ada', 'babbage', 'lovelace']);
+    // An entry this run is rewriting releases its keywords back into the pool.
+    assert.deepEqual([...collectClaimedKeywords(existing, new Set(['ada']))], ['babbage']);
+});
+
+test('a keyword wanted by two entries goes to the one whose title it names', () => {
+    const { entries, collisions } = enforceGlobalKeywordUniqueness([
+        entry({ title: 'The Brotherhood of Steel', key: ['Brotherhood of Steel', 'the Brotherhood'] }),
+        entry({ title: 'Elder Maxson', key: ['Maxson', 'Brotherhood of Steel'] }),
+    ]);
+    assert.deepEqual(entries[0].key, ['Brotherhood of Steel', 'the Brotherhood']);
+    assert.deepEqual(entries[1].key, ['Maxson']);
+    assert.equal(collisions.length, 1);
+    assert.equal(collisions[0].winner, 'The Brotherhood of Steel');
+    assert.deepEqual(collisions[0].strippedFrom, ['Elder Maxson']);
+});
+
+test('an exact title match beats a merely-containing one, and emission order is the last resort', () => {
+    const exact = enforceGlobalKeywordUniqueness([
+        entry({ title: 'Riverwood Inn', key: ['Riverwood'] }),
+        entry({ title: 'Riverwood', key: ['Riverwood'] }),
+    ]).entries;
+    assert.deepEqual(exact.map(e => e.key), [['Riverwood Inn'], ['Riverwood']],
+        'the town wins "Riverwood"; the inn falls back to its own free title');
+
+    const neither = enforceGlobalKeywordUniqueness([
+        entry({ title: 'Alpha', key: ['relic'] }),
+        entry({ title: 'Beta', key: ['relic'] }),
+    ]).entries;
+    assert.deepEqual(neither[0].key, ['relic']);
+    assert.deepEqual(neither[1].key, ['Beta']);
+});
+
+test('the existing book always wins — an incumbent keyword is stripped from every new entry', () => {
+    const { entries, collisions } = enforceGlobalKeywordUniqueness(
+        [entry({ title: 'Ada Lovelace', key: ['Ada', 'Lovelace'] })],
+        collectClaimedKeywords([{ title: 'Ada', keys: ['ADA'] }]),
+    );
+    assert.deepEqual(entries[0].key, ['Lovelace']);
+    assert.equal(collisions[0].winner, '(existing lorebook entry)');
+});
+
+test('an entry stripped bare is marked keywordless rather than silently colliding', () => {
+    const claimed = collectClaimedKeywords([{ title: 'incumbent', keys: ['ghost', 'Ada'] }]);
+    const { entries } = enforceGlobalKeywordUniqueness([entry({ title: 'Ada', key: ['ghost'] })], claimed);
+    assert.deepEqual(entries[0].key, []);
+    assert.equal(entries[0].keywordless, true);
+});
+
+test('regex keys are passed through untouched — they are not text keywords', () => {
+    const { entries } = enforceGlobalKeywordUniqueness([
+        entry({ title: 'Weather', key: ['/(rain|storm)/i'] }),
+        entry({ title: 'Storm', key: ['/(rain|storm)/i', 'Storm'] }),
+    ]);
+    assert.ok(entries[0].key.includes('/(rain|storm)/i'));
+    assert.ok(entries[1].key.includes('/(rain|storm)/i'));
+    assert.equal(findKeywordCollisions(entries).length, 0);
+});
+
+test('keysecondary loses anything the entry already triggers on, and resets the logic when emptied', () => {
+    const { entries } = enforceGlobalKeywordUniqueness([
+        entry({ title: 'Ada', key: ['Ada'], keysecondary: ['ada', 'engine'], selectiveLogic: 3 }),
+        entry({ title: 'Bob', key: ['Bob'], keysecondary: ['bob'], selectiveLogic: 3 }),
+    ]);
+    assert.deepEqual(entries[0].keysecondary, ['engine']);
+    assert.equal(entries[0].selectiveLogic, 3, 'still has a filter, so the logic stands');
+    assert.deepEqual(entries[1].keysecondary, []);
+    assert.equal(entries[1].selectiveLogic, SELECTIVE_LOGIC.AND_ANY);
+});
+
+// ---------------------------------------------------------------- the call
+
+test('generateOneShotEntries retries once with the JSON-only reprimand', async () => {
+    const prompts = [];
+    const parsed = await generateOneShotEntries({
+        prompt: 'P',
+        generate: async (p) => {
+            prompts.push(p);
+            return prompts.length === 1 ? 'sorry, here is some prose' : reply([entry({ title: 'Ada' })]);
+        },
+    });
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1], /No prose, no code fences/);
+    assert.equal(parsed.entries[0].title, 'Ada');
+});
+
+test('generateOneShotEntries gives up after the retry rather than writing a guess', async () => {
+    let calls = 0;
+    const parsed = await generateOneShotEntries({ prompt: 'P', generate: async () => { calls++; return 'nope'; } });
+    assert.equal(calls, 2);
+    assert.equal(parsed, null);
+});
+
+test('summarizeOneShot reports what actually happened', () => {
+    assert.equal(summarizeOneShot({ created: 3, updated: 1 }), 'one-shot lorebook: 3 created, 1 updated');
+    assert.match(summarizeOneShot({ created: 1, dropped: 2, collisions: [{}], keywordless: 1 }),
+        /2 unusable entries dropped · 1 keyword collision resolved · 1 entry left without a free keyword/);
+});
+
+// ---------------------------------------------------------------- acceptance
+
+test('ACCEPTANCE: one run produces zero cross-entry keyword collisions, post-hoc dedup disabled', async () => {
+    // A deliberately hostile model reply: shared surnames, a faction name every
+    // member claims, a location named after a person, and keywords the existing
+    // book already owns. Nothing downstream is allowed to clean this up.
+    const modelReply = reply([
+        entry({ title: 'Elder Maxson', key: ['Maxson', 'Elder', 'Brotherhood of Steel'] }),
+        entry({ title: 'Sarah Maxson', key: ['Maxson', 'Sarah', 'Brotherhood of Steel'] }),
+        entry({ title: 'Brotherhood of Steel', key: ['Brotherhood of Steel', 'the Brotherhood', 'Elder'] }),
+        entry({ title: 'Maxson Bridge', key: ['Maxson Bridge', 'Maxson', 'the bridge'] }),
+        entry({ title: 'The Citadel', key: ['Citadel', 'Ada'] }),   // "Ada" belongs to the book already
+    ]);
+
+    const existingBook = [
+        { title: 'Ada', keys: ['Ada'], isMemory: false },
+        { title: 'Scene 1-20', keys: ['the bridge'], isMemory: true },
+    ];
+
+    const parsed = await generateOneShotEntries({ prompt: 'P', generate: async () => modelReply });
+    const rewritten = new Set(parsed.entries.map(e => e.title.toLowerCase()));
+    const claimed = collectClaimedKeywords(existingBook, rewritten);
+    const { entries } = enforceGlobalKeywordUniqueness(parsed.entries, claimed);
+
+    // 1. No two GENERATED entries share a keyword.
+    assert.deepEqual(findKeywordCollisions(entries), []);
+
+    // 2. No generated entry steals a keyword the book already owns. The book
+    //    after the run is: every untouched existing entry, plus the new set.
+    const wholeBook = [
+        ...existingBook.filter(e => !rewritten.has(e.title.toLowerCase())).map(e => ({ title: e.title, key: e.keys })),
+        ...entries.map(e => ({ title: e.title, key: e.key })),
+    ];
+    assert.deepEqual(findKeywordCollisions(wholeBook), []);
+
+    // 3. Every entry is still retrievable — the fix must not silence entries.
+    for (const e of entries) {
+        assert.ok(e.key.length > 0, `${e.title} shipped with no keyword at all`);
+    }
+
+    // And the awards landed where a human would put them.
+    const byTitle = Object.fromEntries(entries.map(e => [e.title, e.key]));
+    assert.ok(byTitle['Brotherhood of Steel'].includes('Brotherhood of Steel'));
+    assert.ok(byTitle['Maxson Bridge'].includes('Maxson Bridge'));
+    assert.ok(!byTitle['The Citadel'].includes('Ada'), 'the existing "Ada" entry keeps its keyword');
+    assert.equal(normalizeKeyword('  Elder   Maxson '), 'elder maxson');
+    assert.equal(ONE_SHOT_DEFAULTS.truncate, 0, 'the one-shot path reads full messages');
+});
