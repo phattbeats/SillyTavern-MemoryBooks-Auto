@@ -72,6 +72,7 @@ import { CLIPPER_DEFAULTS } from "./clipperPlusCore.js";
 // STMBC-HOOK(auditor): resumable full-chat audit chunk-walker (fork; plan §4.3).
 import {
   executeAuditJob,
+  getAuditNotes,
   handleAuditCommand,
   handleStmbcStopCommand,
   runAuditInline,
@@ -1901,6 +1902,17 @@ async function runStmbAutoPipeline(jobContext) {
     lorebookCreated = true;
   }
 
+  // Does this chat already have an audit checkpoint? Never fatal — a missing or
+  // corrupt checkpoint just means there is nothing to extend.
+  const hasExistingAuditNotes = () => {
+    try {
+      return !!getAuditNotes();
+    } catch (error) {
+      console.warn("STMemoryBooks: could not read the audit checkpoint:", error);
+      return false;
+    }
+  };
+
   // PHA-1871: decide the shape of the run BEFORE doing any work. When the whole
   // transcript fits in the model's context window, steps 2 and 4 (the audit walk
   // and the per-entity coverage loop) are both replaced by ONE call that sees
@@ -1919,9 +1931,21 @@ async function runStmbAutoPipeline(jobContext) {
   // that step 4's coverage scan reads from. Resumes any existing checkpoint
   // rather than restarting, same default as a bare /stmbc-audit. Skipped whole
   // on the one-shot path — nothing downstream reads the notes there.
+  //
+  // PHA-1886 §1: the chunked path no longer consumes these notes either —
+  // `runChunkedLorebook` derives its own entities pass by pass, and the notes
+  // now only feed the manual /stmbc-coverage and /stmbc-regen commands. Making
+  // small-context users (exactly who lands on this path) pay ceil(N/chunk)
+  // extra LLM calls for a status string is not a trade we get to make for them.
+  // So: never START an audit nobody asked for, but DO extend one that already
+  // exists, so a user who ran /stmbc-audit keeps a current checkpoint for the
+  // coverage tooling.
   let auditMessage = "";
   if (useOneShot) {
     auditMessage = `Skipped the chunked audit walk — ${oneShotPlan.reason}.`;
+  } else if (!hasExistingAuditNotes()) {
+    auditMessage =
+      "Skipped the audit walk — nothing in this run reads it. Run /stmbc-audit if you want the coverage report.";
   } else {
     reportPhase(translate("STMB Auto: reading the whole story…", "STMemoryBooks_AutoAuditing"));
     try {

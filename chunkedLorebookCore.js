@@ -40,6 +40,7 @@ import { formatAuditMessage } from './auditorCore.js';
 import { estimateTokens } from './contextBudget.js';
 import {
     ONE_SHOT_DEFAULTS,
+    containsWholeWord,
     enforceGlobalKeywordUniqueness,
     normalizeKeyword,
     parseOneShotEntries,
@@ -414,14 +415,42 @@ export function formatLedger(ledger, ledgerTokens = 0, estimator = estimateToken
     return { text: assemble(render('keywords-only')), truncated: 'keywords-only', tokens: 0 };
 }
 
-/** Render the draft entry set for the reconciliation prompt. */
-export function formatDraftEntries(entries) {
+/**
+ * Render the draft entry set for the reconciliation prompt, fitted to `capTokens`.
+ *
+ * Same defined degradation as formatLedger — full content → 240-char excerpts →
+ * titles and keywords only — because this render is charged against the
+ * reconciliation budget as overhead. Uncapped, 60 drafted entries can consume
+ * the entire budget on a small window and starve reconciliation completely
+ * (PHA-1886 §2).
+ *
+ * @returns {{text:string, truncated:false|'excerpt'|'titles-only', tokens:number}}
+ */
+export function formatDraftEntries(entries, capTokens = 0, estimator = estimateTokens) {
     const list = Array.isArray(entries) ? entries : [];
-    if (!list.length) return '(no entries were drafted)';
-    return list.map(e => {
-        const keys = (Array.isArray(e.key) ? e.key : []).join(', ') || '(none)';
-        return `- ${e.title} [${e.kind}] keywords: ${keys}\n  ${String(e.content ?? '').replace(/\n+/g, ' ')}`;
-    }).join('\n');
+    const cap = toPositiveInt(capTokens);
+
+    const render = (mode) => {
+        if (!list.length) return '(no entries were drafted)';
+        return list.map((e) => {
+            const keys = (Array.isArray(e.key) ? e.key : []).join(', ') || '(none)';
+            const head = `- ${e.title} [${e.kind}] keywords: ${keys}`;
+            if (mode === 'titles-only') return head;
+            const flat = String(e.content ?? '').replace(/\n+/g, ' ');
+            const body = mode === 'excerpt' ? truncateAt(flat, 240) : flat;
+            return body ? `${head}\n  ${body}` : head;
+        }).join('\n');
+    };
+
+    for (const mode of ['full', 'excerpt', 'titles-only']) {
+        const text = render(mode);
+        const tokens = estimator(text);
+        if (!cap || tokens <= cap || mode === 'titles-only') {
+            return { text, truncated: mode === 'full' ? false : mode, tokens };
+        }
+    }
+    /* c8 ignore next */
+    return { text: render('titles-only'), truncated: 'titles-only', tokens: 0 };
 }
 
 /** Render the extracted messages as the transcript block for one pass. */
@@ -823,7 +852,9 @@ export function markDegradedEntries(entries, unresolved = [], passCount = 0) {
         const hits = open.filter((u) => {
             if (!name) return false;
             if (normalizeKeyword(u.about) === name) return true;
-            return normalizeKeyword(u.question).includes(name);
+            // Whole-word, not substring: "Ash" must not be flagged degraded by a
+            // question about "ashes" (PHA-1886 §6).
+            return containsWholeWord(normalizeKeyword(u.question), name);
         });
         const next = { ...e, stmbAutoPasses: passCount };
         if (hits.length) {
