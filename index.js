@@ -14,6 +14,7 @@ import {
 import { Popup, POPUP_TYPE, POPUP_RESULT } from "../../../popup.js";
 import {
   extension_settings,
+  getContext as getStContext,
 } from "../../../extensions.js";
 import { SlashCommandParser } from "../../../slash-commands/SlashCommandParser.js";
 import { SlashCommand } from "../../../slash-commands/SlashCommand.js";
@@ -74,29 +75,39 @@ import {
   handleAuditCommand,
   handleStmbcStopCommand,
   runAuditInline,
-  getAuditNotes,
-  resolveAuditConfig,
 } from "./auditor.js";
 // STMBC-HOOK(auditor-jobs): coverage audit + entry regeneration over the walker's
 // running notes (fork; plan §4.3 jobs 1–2).
 import {
   handleCoverageCommand,
   handleRegenCommand,
-  resolveCoverageConfig,
-  resolveRegenConfig,
   loadBoundLorebook,
-  entriesForCoverage,
-  resolveJobsConnection,
-  bulkGenerate,
 } from "./auditorJobs.js";
-import { auditCoverage, buildCoverageIndex } from "./auditorJobsCore.js";
+// STMBC-HOOK(one-shot): PHA-1871 — when the whole story fits in the model's
+// context window, /stmb-auto replaces the audit walk + per-entity coverage loop
+// with a single call that emits the complete entry set, so keywords are assigned
+// globally and non-overlapping by construction instead of deduped after the fact.
+import { planOneShotRun, runOneShotLorebook } from "./oneShotLorebook.js";
+// STMBC-HOOK(chunked-lorebook): PHA-1879 — the fallback for stories that do NOT
+// fit. Same entry set, written by N passes that carry an entity registry and an
+// unresolved-reference ledger between them, closed by a reconciliation pass, and
+// flagged where a cross-reference could not be closed. Replaces the old
+// coverage + per-entity bulkGenerate loop, whose passes were blind to each other.
+import { planChunkedRun, runChunkedLorebook } from "./chunkedLorebook.js";
 // STMBC-HOOK(stmb-auto): PHA-1846 — the zero-argument "just run it" orchestrator.
 // Pure chunk-planning/summary logic lives in stmbAutoCore.js (DI, node:test).
 import {
   resolveStmbAutoConfig,
   planAutoMemoryChunks,
+  planTokenBoundedMemoryChunks,
+  resizeChunksToBudget,
   buildStmbAutoSummary,
 } from "./stmbAutoCore.js";
+// PHA-1870: scene-memory chunk sizing reads the model's real context window,
+// and the non-interactive token gate resizes an oversized chunk instead of
+// aborting the run over it.
+import { resolveContextWindow, planContextBudget } from "./contextBudget.js";
+import { oai_settings } from "../../../openai.js";
 import { refreshCatalogForCoverageRun } from "./catalog.js";
 import { registerAuditorJobs } from "./auditorTechnicalPass.js";
 import {
@@ -1378,7 +1389,107 @@ function compileSceneForCatchupPreflight(sceneRequest, unhideBeforeMemory) {
   }
 }
 
+/**
+ * PHA-1870: the model's usable story budget for one scene-memory call.
+ * Never throws — an unreadable backend degrades to the 256k default rather
+ * than taking the whole run down.
+ */
+function resolveSceneMemoryBudget() {
+  const autoModule = extension_settings?.STMemoryBooks?.autoModule;
+  try {
+    return planContextBudget(
+      resolveContextWindow({
+        override: autoModule?.contextWindow,
+        perChatOverride: chat_metadata?.stmbc?.contextWindow,
+        oaiSettings: typeof oai_settings !== "undefined" ? oai_settings : undefined,
+        // Non-chat-completion backends (textgen/kobold/novel) never populate
+        // oai_settings; ST's context object carries their preset context slider.
+        getMaxContextSize: () => getStContext()?.maxContext,
+      }),
+    );
+  } catch (error) {
+    console.warn("STMemoryBooks: context budget resolution failed, using defaults:", error);
+    return planContextBudget(0);
+  }
+}
+
+/**
+ * The token ceiling a single scene memory may actually reach.
+ *
+ * `tokenWarningThreshold` (50000) predates any context awareness: it is a
+ * warning, not a capability statement, so on a large-context model it must not
+ * be the binding constraint. The effective cap is whichever is larger — the
+ * user's threshold or what the window can genuinely hold. stmemory.js's own
+ * re-check receives this same number (it comes from showAndGetMemorySettings),
+ * so the two gates stay consistent.
+ */
+function resolveSceneMemoryTokenCap(settings) {
+  const threshold = Number(settings?.moduleSettings?.tokenWarningThreshold ?? 50000) || 50000;
+  return Math.max(threshold, resolveSceneMemoryBudget().inputTokens);
+}
+
+/** Text of a chat message by index, for token estimation. */
+const chatTextAt = (index) => chat?.[index]?.mes || "";
+
+/**
+ * Preflight the non-interactive catch-up/auto path.
+ *
+ * Returns `{ error, chunks }`: `error` is a blocker string (run cannot proceed)
+ * and `chunks` is the possibly-RESIZED plan the caller should run. Oversized
+ * chunks used to abort the whole run; they are now re-split to fit the budget,
+ * and only a single message larger than the entire window is fatal.
+ */
 async function validateStmbCatchupNonInteractive(settings, chunks) {
+  const blocker = await validateStmbCatchupPreconditions(settings);
+  if (blocker) return { error: blocker, chunks: [] };
+
+  const tokenCap = resolveSceneMemoryTokenCap(settings);
+  const resize = resizeChunksToBudget(chunks, chatTextAt, tokenCap);
+  if (resize.oversized.length) {
+    const worst = resize.oversized[0];
+    return {
+      error: __st_t_tag`/stmb-catchup cannot run non-interactively: message ${worst.id} alone is estimated at ${worst.tokens} tokens, above the ${tokenCap}-token budget for a single call. Raise the token warning threshold or the context window.`,
+      chunks: [],
+    };
+  }
+  if (resize.resized) {
+    console.log(
+      `STMemoryBooks: resized scene-memory plan to fit ${tokenCap} tokens/chunk (${chunks.length} -> ${resize.chunks.length} chunks)`,
+    );
+  }
+
+  const moduleSettings = settings?.moduleSettings || {};
+  for (const chunk of resize.chunks) {
+    try {
+      const sceneRequest = createSceneRequest(chunk.start, chunk.end);
+      const compiledScene = compileSceneForCatchupPreflight(
+        sceneRequest,
+        !!moduleSettings.unhideBeforeMemory,
+      );
+      const validation = validateCompiledScene(compiledScene);
+      if (!validation.valid) {
+        return {
+          error: __st_t_tag`/stmb-catchup cannot run non-interactively because chunk ${chunk.start}-${chunk.end} cannot be compiled: ${validation.errors.join(", ")}`,
+          chunks: [],
+        };
+      }
+    } catch (error) {
+      return {
+        error: __st_t_tag`/stmb-catchup cannot run non-interactively because chunk ${chunk.start}-${chunk.end} cannot be compiled: ${error.message}`,
+        chunks: [],
+      };
+    }
+  }
+
+  return { error: null, chunks: resize.chunks };
+}
+
+/**
+ * Everything about the non-interactive preflight that does not depend on the
+ * chunk plan: profile/preview settings, lorebook binding, group bindings.
+ * Returns a blocker string, or null when the run may proceed.
+ */
+async function validateStmbCatchupPreconditions(settings) {
   const moduleSettings = settings?.moduleSettings || {};
 
   if (!moduleSettings.alwaysUseDefault) {
@@ -1432,30 +1543,6 @@ async function validateStmbCatchupNonInteractive(settings, chunks) {
   );
   if (!manualGroupLorebooks.valid) {
     return manualGroupLorebooks.error;
-  }
-
-  const tokenThreshold = moduleSettings.tokenWarningThreshold ?? 30000;
-
-  for (const chunk of chunks) {
-    try {
-      const sceneRequest = createSceneRequest(chunk.start, chunk.end);
-      const compiledScene = compileSceneForCatchupPreflight(
-        sceneRequest,
-        !!moduleSettings.unhideBeforeMemory,
-      );
-      const validation = validateCompiledScene(compiledScene);
-      if (!validation.valid) {
-        return __st_t_tag`/stmb-catchup cannot run non-interactively because chunk ${chunk.start}-${chunk.end} cannot be compiled: ${validation.errors.join(", ")}`;
-      }
-
-      const stats = await getSceneStats(compiledScene);
-      const estimatedTokens = Number(stats?.estimatedTokens ?? 0);
-      if (estimatedTokens > tokenThreshold) {
-        return __st_t_tag`/stmb-catchup is non-interactive. Chunk ${chunk.start}-${chunk.end} is estimated at ${estimatedTokens} tokens, above the token warning threshold (${tokenThreshold}). Increase the threshold or use a smaller interval.`;
-      }
-    } catch (error) {
-      return __st_t_tag`/stmb-catchup cannot run non-interactively because chunk ${chunk.start}-${chunk.end} cannot be compiled: ${error.message}`;
-    }
   }
 
   return null;
@@ -1608,7 +1695,7 @@ async function handleStmbCatchupCommand(namedArgs) {
       return "";
     }
 
-    const chunks = [];
+    let chunks = [];
     for (let chunkStart = startId; chunkStart <= endId; chunkStart += interval) {
       const chunkEnd = Math.min(chunkStart + interval - 1, endId);
       if (!chat[chunkStart] || !chat[chunkEnd]) {
@@ -1622,17 +1709,17 @@ async function handleStmbCatchupCommand(namedArgs) {
     }
 
     const settings = initializeSettings();
-    const interactiveBlocker = await validateStmbCatchupNonInteractive(
-      settings,
-      chunks,
-    );
-    if (interactiveBlocker) {
+    const preflight = await validateStmbCatchupNonInteractive(settings, chunks);
+    if (preflight.error) {
       toastr.error(
-        interactiveBlocker,
+        preflight.error,
         translate("STMemoryBooks", "index.toast.title"),
       );
       return "";
     }
+    // The preflight may have re-split oversized chunks to fit the budget; run
+    // what it approved, not what the interval originally produced.
+    chunks = preflight.chunks;
 
     toastr.info(
       __st_t_tag`STMB catch-up started: ${chunks.length} chunk${chunks.length === 1 ? "" : "s"}.`,
@@ -1814,16 +1901,35 @@ async function runStmbAutoPipeline(jobContext) {
     lorebookCreated = true;
   }
 
+  // PHA-1871: decide the shape of the run BEFORE doing any work. When the whole
+  // transcript fits in the model's context window, steps 2 and 4 (the audit walk
+  // and the per-entity coverage loop) are both replaced by ONE call that sees
+  // every entry at once — the only way keyword assignment can be globally
+  // consistent. Otherwise fall back to the chunked path, unchanged.
+  let oneShotPlan = null;
+  try {
+    oneShotPlan = planOneShotRun({ autoModule, chatMetadata: chat_metadata, chatArray: chat });
+  } catch (error) {
+    console.warn("STMemoryBooks: /stmb-auto one-shot planning failed, using the chunked path:", error);
+    oneShotPlan = null;
+  }
+  const useOneShot = oneShotPlan?.oneShot === true;
+
   // Step 2: full-chat audit walk — the character/location/event ground truth
   // that step 4's coverage scan reads from. Resumes any existing checkpoint
-  // rather than restarting, same default as a bare /stmbc-audit.
-  reportPhase(translate("STMB Auto: reading the whole story…", "STMemoryBooks_AutoAuditing"));
+  // rather than restarting, same default as a bare /stmbc-audit. Skipped whole
+  // on the one-shot path — nothing downstream reads the notes there.
   let auditMessage = "";
-  try {
-    auditMessage = await runAuditInline(false);
-  } catch (error) {
-    console.error("STMemoryBooks: /stmb-auto audit step failed:", error);
-    auditMessage = `Audit step failed: ${error?.message || error}`;
+  if (useOneShot) {
+    auditMessage = `Skipped the chunked audit walk — ${oneShotPlan.reason}.`;
+  } else {
+    reportPhase(translate("STMB Auto: reading the whole story…", "STMemoryBooks_AutoAuditing"));
+    try {
+      auditMessage = await runAuditInline(false);
+    } catch (error) {
+      console.error("STMemoryBooks: /stmb-auto audit step failed:", error);
+      auditMessage = `Audit step failed: ${error?.message || error}`;
+    }
   }
 
   // Step 3: chunked scene memories for everything not yet summarized.
@@ -1834,14 +1940,27 @@ async function runStmbAutoPipeline(jobContext) {
   // closure over the caller, so there's nothing to reuse anyway.
   const highestProcessed = getHighestMemoryProcessed();
   const lastIndex = chat.length - 1;
-  const memoryChunks = planAutoMemoryChunks(highestProcessed, lastIndex, stmbAutoCfg.memoryInterval);
+  // PHA-1870: size the chunks from the context window unless the user pinned
+  // memoryInterval by hand. The old fixed 26-message interval was a proxy for
+  // size from before anything here could read the window; with a real budget a
+  // 256k model writes a few large scene memories instead of dozens of tiny,
+  // mutually-blind ones.
+  let memoryChunks = stmbAutoCfg.memoryIntervalPinned
+    ? planAutoMemoryChunks(highestProcessed, lastIndex, stmbAutoCfg.memoryInterval)
+    : planTokenBoundedMemoryChunks(
+        highestProcessed,
+        lastIndex,
+        chatTextAt,
+        resolveSceneMemoryBudget().inputTokens,
+      );
   let memoriesCreated = 0;
   let memorySkipReason = null;
   if (memoryChunks.length) {
-    const blocker = await validateStmbCatchupNonInteractive(settings, memoryChunks);
-    if (blocker) {
-      memorySkipReason = blocker;
+    const preflight = await validateStmbCatchupNonInteractive(settings, memoryChunks);
+    if (preflight.error) {
+      memorySkipReason = preflight.error;
     } else {
+      memoryChunks = preflight.chunks;
       reportPhase(
         __st_t_tag`STMB Auto: writing ${memoryChunks.length} scene memor${memoryChunks.length === 1 ? "y" : "ies"}…`,
       );
@@ -1878,26 +1997,56 @@ async function runStmbAutoPipeline(jobContext) {
     }
   }
 
-  // Step 4: coverage-driven, headless generation of character/location entries
-  // from the audit notes. minChunks is relaxed to stmbAutoCfg.coverageMinChunks
-  // (default 1, not the coverage job's own default of 2) — that gate is
-  // mathematically unsatisfiable on any chat small enough to fit in one audit
-  // chunk, and a from-scratch full-story run must still surface those names.
+  // Step 4: the lorebook itself. Both shapes write the COMPLETE entry set with
+  // globally-unique keywords; they differ only in how much of the story one call
+  // can see. One-shot when it all fits (PHA-1871), otherwise the ledgered
+  // chunked path (PHA-1879) — never the old per-entity loop, whose calls were
+  // blind to each other and left the collisions for post-hoc dedup to filter.
   let loreMessage = "";
   let loreGenerated = 0;
-  const auditNotes = getAuditNotes();
-  if (auditNotes) {
+
+  if (useOneShot) {
+    // Step 4 (one-shot): the whole entry set from a single call, written with
+    // globally-unique keywords. Runs AFTER the scene memories so those entries'
+    // keywords are already in the book and this pass yields to them rather than
+    // colliding with them — post-hoc dedup is a net here, not the mechanism.
     try {
       const lorebook = await loadBoundLorebook();
-      if (lorebook) {
-        const coverageCfg = resolveCoverageConfig(autoModule, chat_metadata);
-        coverageCfg.minChunks = stmbAutoCfg.coverageMinChunks;
-        const regenCfg = resolveRegenConfig(autoModule, chat_metadata);
-        const auditCfg = resolveAuditConfig(autoModule, chat_metadata);
-        const entries = entriesForCoverage(lorebook.data);
-        const report = auditCoverage(auditNotes, entries, coverageCfg);
-        const coverageIndex = buildCoverageIndex(entries);
-
+      if (!lorebook) {
+        loreMessage = "Could not load the bound lorebook for the one-shot step.";
+      } else {
+        reportPhase(
+          translate("STMB Auto: writing the whole lorebook in one pass…", "STMemoryBooks_AutoOneShot"),
+        );
+        const result = await runOneShotLorebook({
+          lorebook,
+          plan: oneShotPlan,
+          onProgress: (msg) => jobContext?.setDetail(msg),
+        });
+        loreMessage = result.message;
+        loreGenerated = result.created + result.updated;
+        if (result.collisions.length) {
+          console.info("STMemoryBooks: /stmb-auto resolved keyword collisions:", result.collisions);
+        }
+      }
+    } catch (error) {
+      console.error("STMemoryBooks: /stmb-auto one-shot step failed:", error);
+      loreMessage = `One-shot lorebook step failed: ${error?.message || error}`;
+    }
+  } else {
+    // Step 4 (chunked fallback): the story does not fit, so it is read in the
+    // FEWEST passes that do — cut at scene boundaries wherever possible, since
+    // every mid-scene cut manufactures a dangling reference. A ledger of the
+    // entities established so far and the keywords each has been AWARDED
+    // travels with every pass, so overlap is prevented at write time rather
+    // than string-filtered afterwards; open cross-references are recorded, not
+    // guessed at, and a reconciliation pass re-reads only the slices they point
+    // at. Whatever it still cannot close is flagged on the entry.
+    try {
+      const lorebook = await loadBoundLorebook();
+      if (!lorebook) {
+        loreMessage = "Could not load the bound lorebook for the chunked lorebook step.";
+      } else {
         try {
           // STMBC-HOOK(catalog): keep the librarian catalog fresh, same as a
           // manual /stmbc-coverage run — never fatal to the auto run.
@@ -1906,25 +2055,39 @@ async function runStmbAutoPipeline(jobContext) {
           console.warn("STMemoryBooks: /stmb-auto catalog refresh failed (non-fatal):", error);
         }
 
-        const targets = [...report.missing, ...report.thin];
-        if (targets.length) {
-          const conn = resolveJobsConnection(regenCfg.profile);
+        const chunkedPlan = planChunkedRun({
+          autoModule,
+          chatMetadata: chat_metadata,
+          chatArray: chat,
+          oneShotPlan,
+        });
+        if (!chunkedPlan.ok) {
+          loreMessage = `Chunked lorebook step skipped: ${chunkedPlan.reason}`;
+        } else {
           reportPhase(
-            __st_t_tag`STMB Auto: generating ${targets.length} character/location entr${targets.length === 1 ? "y" : "ies"}…`,
+            __st_t_tag`STMB Auto: writing the lorebook in ${chunkedPlan.passes.length} pass${chunkedPlan.passes.length === 1 ? "" : "es"}…`,
           );
-          loreMessage = await bulkGenerate(
-            targets,
-            { notes: auditNotes, lorebook, coverageIndex, regenCfg, auditCfg, conn },
-            stmbAutoCfg.bulkGenerateCap,
-          );
-          loreGenerated = targets.length;
+          const result = await runChunkedLorebook({
+            lorebook,
+            plan: chunkedPlan,
+            onProgress: (msg) => jobContext?.setDetail(msg),
+          });
+          loreMessage = result.message;
+          loreGenerated = result.created + result.updated;
+          if (result.collisions.length) {
+            console.info("STMemoryBooks: /stmb-auto resolved keyword collisions:", result.collisions);
+          }
+          if (result.unresolved.length) {
+            console.info(
+              "STMemoryBooks: /stmb-auto left cross-references unresolved (raise the context window and re-run):",
+              result.unresolved,
+            );
+          }
         }
-      } else {
-        loreMessage = "Could not load the bound lorebook for the coverage step.";
       }
     } catch (error) {
-      console.error("STMemoryBooks: /stmb-auto coverage step failed:", error);
-      loreMessage = `Coverage step failed: ${error?.message || error}`;
+      console.error("STMemoryBooks: /stmb-auto chunked lorebook step failed:", error);
+      loreMessage = `Chunked lorebook step failed: ${error?.message || error}`;
     }
   }
 
@@ -3944,7 +4107,12 @@ async function showAndGetMemorySettings(
   return {
     profileSettings,
     summaryCount: advancedOptions.memoryCount ?? 0,
-    tokenThreshold,
+    // PHA-1870: the confirmation popup above still triggers on the user's raw
+    // warning threshold, but what stmemory.createMemory HARD-FAILS on is the
+    // context-aware cap. A 150k-token chunk on a 256k model is inside the
+    // model's means; refusing to generate it would make context-sized scene
+    // chunks unusable.
+    tokenThreshold: Math.max(tokenThreshold, resolveSceneMemoryTokenCap(settings)),
     settings,
   };
 }

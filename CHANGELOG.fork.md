@@ -17,6 +17,117 @@ Fork home: https://github.com/phattbeats/SillyTavern-MemoryBooks-Auto.
 > contents and is preserved for audit purposes.
 
 
+## v0.0.23 (2026-08-09) — feat: the chunked fallback carries a ledger between passes and reconciles at the end
+
+Closes [PHA-1879](/PHA/issues/PHA-1879). v0.0.21 made the *one-shot* path good.
+This makes the **fallback** path good — the one that runs for a story too large
+to fit the effective context budget, and which until now was still the exact
+shape that caused the original bug: passes blind to each other, with
+`dedupeAgainstExistingEntries` filtering the symptom afterwards.
+
+`/stmb-auto` no longer falls back to the per-entity coverage loop at all. When
+the story does not fit, it runs a **ledgered chunked pass** instead:
+
+- **Fewest passes, cut at scene boundaries.** The story is sliced into the
+  fewest passes that fit, and a pass closes early at a chapter/scene boundary
+  once it is ~60% full rather than cutting mid-scene. Every mid-scene cut
+  manufactures a dangling reference; the ones we are still forced to make are
+  counted and reported.
+- **An entity registry travels with every pass.** Each pass sees every subject
+  established so far, its current entry text, and the keywords it has already
+  been *awarded*. Overlap is prevented at write time instead of string-filtered
+  after the fact. The award rule is the same `enforceGlobalKeywordUniqueness`
+  the one-shot path uses, re-run after every pass — so both paths resolve a
+  contested keyword identically, and the registry a pass reads is always
+  already collision-free.
+- **A pass that sees an effect without its cause records the question.** It does
+  not guess and it does not write the guess into an entry.
+- **A reconciliation pass closes the run.** It sees the full draft entry set and
+  the ledger, and re-reads *only* the slices the open questions point at. Its
+  token budget is reserved out of the context budget up front, so it can never
+  be the pass that overflows the window. Questions whose slices did not fit the
+  budget are logged, not silently dropped.
+- **Degraded output says so.** Every entry records `stmbAutoPasses` (the pass
+  count). Any entry whose facts came from a cross-reference that stayed open is
+  additionally flagged `stmbAutoDegraded` with the unanswered question, and the
+  run summary names the count and tells the operator to raise the context window
+  and re-run. These live on the entry, not in its content, so they cost nothing
+  at generation time.
+
+New files: `chunkedLorebookCore.js` (pure, DI, unit-tested) and
+`chunkedLorebook.js` (runtime binding), mirroring the `auditorCore.js` ↔
+`auditor.js` split.
+
+Configurable under `autoModule.chunkedLorebook` (global) or
+`chat_metadata.stmbc.chunkedLorebook` (per-chat): `enabled`, `maxEntries`,
+`maxEntriesPerPass`, `minContentChars`, `truncate`, `profile`, `ledgerFraction`,
+`reconcileFraction`, `boundaryMinFill`, `maxUnresolved`, `passPrompt`,
+`reconcilePrompt`.
+
+`bulkGenerate` and the coverage report are untouched and still back the manual
+`/stmbc-coverage` and `/stmbc-regen` commands; they are simply no longer how
+`/stmb-auto` writes lore.
+
+
+## v0.0.22 (2026-08-09) — fix: scene-memory chunks are sized from the context window too
+
+Closes [PHA-1870](/PHA/issues/PHA-1870). v0.0.20 gave the audit walk a real
+context budget but left the scene-memory step on the fixed 26-message interval,
+and the preset context slider was only read on OpenAI-style backends. Scene
+memory chunks are now sized from the same budget (unless `memoryInterval` is
+pinned by hand) and resized at the gate, and the window is read from the preset
+on non-OpenAI backends as well.
+
+
+## v0.0.21 (2026-08-09) — feat: one-shot whole-story lorebook generation when the story fits the context window
+
+Closes [PHA-1871](/PHA/issues/PHA-1871). The payoff of
+[PHA-1862](/PHA/issues/PHA-1862), and the structural fix for cross-entry
+keyword overlap.
+
+A `/stmb-auto` run used to be `ceil(N/chunk)` audit calls plus up to
+`bulkGenerateCap` per-entity derivation calls, none of which shared any state.
+No call ever saw the whole entry set, so consistent keyword assignment was
+structurally impossible — `addlore.js dedupeAgainstExistingEntries` only
+filtered the symptom afterwards, and only on the scene-memory path.
+
+v0.0.20 added `contextBudget.js` but only the audit walk read it. Now
+`/stmb-auto` asks `fitsInOneCall()` up front:
+
+- **When the whole transcript fits**, the audit walk *and* the per-entity
+  coverage loop are both skipped. One call receives the full transcript plus
+  the full existing lorebook and emits the COMPLETE entry set together.
+- **When it does not fit** (small model, or a story that outgrew the window),
+  the chunked path runs exactly as before. `dedupeAgainstExistingEntries` stays
+  in place as the net for that path.
+
+Two things make the keywords actually non-overlapping rather than merely
+requested:
+
+1. **The prompt now says exactly what a good entry looks like.** It documents
+   the real World Info field semantics from the current SillyTavern docs —
+   `key` vs `keysecondary`, `selectiveLogic` (0 AND ANY / 1 NOT ALL / 2 NOT ANY
+   / 3 AND ALL), `constant` vs keyword-triggered, `order` (lower inserts
+   *earlier*), `position`, `scanDepth`, `preventRecursion` — instead of asking
+   for a bag of keywords and hoping.
+2. **`enforceGlobalKeywordUniqueness` makes it a guarantee.** Any keyword wanted
+   by two entries is awarded to exactly one, deterministically: the entry whose
+   title *is* the keyword, else the entry whose title contains it as a whole
+   word, else first emitted. Keywords already claimed by an untouched existing
+   entry (including scene memories, which this pass never rewrites) are stripped
+   from every new entry — the incumbent keeps them. An entry left with nothing
+   is flagged and forced non-`constant` rather than shipped colliding.
+
+The one-shot pass runs *after* the scene-memory step so it yields to the
+keywords those entries just claimed. New files: `oneShotLorebookCore.js` (pure,
+DI, unit-tested) and `oneShotLorebook.js` (runtime binding), mirroring the
+`auditorCore.js` ↔ `auditor.js` split.
+
+Configurable under `autoModule.oneShot` (global) or `chat_metadata.stmbc.oneShot`
+(per-chat): `enabled`, `maxEntries`, `minContentChars`, `truncate`, `profile`,
+`prompt`. Set `enabled: false` to always take the chunked path.
+
+
 ## v0.0.16 (2026-08-09) — fix: existing installs were still stuck at the old Max Response Tokens default after v0.0.15
 
 Closes [PHA-1846](/PHA/issues/PHA-1846). v0.0.15 changed `DEFAULT_MAX_TOKENS`
