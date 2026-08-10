@@ -100,8 +100,15 @@ import { planOneShotRun, runOneShotLorebook } from "./oneShotLorebook.js";
 import {
   resolveStmbAutoConfig,
   planAutoMemoryChunks,
+  planTokenBoundedMemoryChunks,
+  resizeChunksToBudget,
   buildStmbAutoSummary,
 } from "./stmbAutoCore.js";
+// PHA-1870: scene-memory chunk sizing reads the model's real context window,
+// and the non-interactive token gate resizes an oversized chunk instead of
+// aborting the run over it.
+import { resolveContextWindow, planContextBudget } from "./contextBudget.js";
+import { oai_settings } from "../../../openai.js";
 import { refreshCatalogForCoverageRun } from "./catalog.js";
 import { registerAuditorJobs } from "./auditorTechnicalPass.js";
 import {
@@ -1383,7 +1390,104 @@ function compileSceneForCatchupPreflight(sceneRequest, unhideBeforeMemory) {
   }
 }
 
+/**
+ * PHA-1870: the model's usable story budget for one scene-memory call.
+ * Never throws — an unreadable backend degrades to the 256k default rather
+ * than taking the whole run down.
+ */
+function resolveSceneMemoryBudget() {
+  const autoModule = extension_settings?.STMemoryBooks?.autoModule;
+  try {
+    return planContextBudget(
+      resolveContextWindow({
+        override: autoModule?.contextWindow,
+        perChatOverride: chat_metadata?.stmbc?.contextWindow,
+        oaiSettings: typeof oai_settings !== "undefined" ? oai_settings : undefined,
+      }),
+    );
+  } catch (error) {
+    console.warn("STMemoryBooks: context budget resolution failed, using defaults:", error);
+    return planContextBudget(0);
+  }
+}
+
+/**
+ * The token ceiling a single scene memory may actually reach.
+ *
+ * `tokenWarningThreshold` (50000) predates any context awareness: it is a
+ * warning, not a capability statement, so on a large-context model it must not
+ * be the binding constraint. The effective cap is whichever is larger — the
+ * user's threshold or what the window can genuinely hold. stmemory.js's own
+ * re-check receives this same number (it comes from showAndGetMemorySettings),
+ * so the two gates stay consistent.
+ */
+function resolveSceneMemoryTokenCap(settings) {
+  const threshold = Number(settings?.moduleSettings?.tokenWarningThreshold ?? 50000) || 50000;
+  return Math.max(threshold, resolveSceneMemoryBudget().inputTokens);
+}
+
+/** Text of a chat message by index, for token estimation. */
+const chatTextAt = (index) => chat?.[index]?.mes || "";
+
+/**
+ * Preflight the non-interactive catch-up/auto path.
+ *
+ * Returns `{ error, chunks }`: `error` is a blocker string (run cannot proceed)
+ * and `chunks` is the possibly-RESIZED plan the caller should run. Oversized
+ * chunks used to abort the whole run; they are now re-split to fit the budget,
+ * and only a single message larger than the entire window is fatal.
+ */
 async function validateStmbCatchupNonInteractive(settings, chunks) {
+  const blocker = await validateStmbCatchupPreconditions(settings);
+  if (blocker) return { error: blocker, chunks: [] };
+
+  const tokenCap = resolveSceneMemoryTokenCap(settings);
+  const resize = resizeChunksToBudget(chunks, chatTextAt, tokenCap);
+  if (resize.oversized.length) {
+    const worst = resize.oversized[0];
+    return {
+      error: __st_t_tag`/stmb-catchup cannot run non-interactively: message ${worst.id} alone is estimated at ${worst.tokens} tokens, above the ${tokenCap}-token budget for a single call. Raise the token warning threshold or the context window.`,
+      chunks: [],
+    };
+  }
+  if (resize.resized) {
+    console.log(
+      `STMemoryBooks: resized scene-memory plan to fit ${tokenCap} tokens/chunk (${chunks.length} -> ${resize.chunks.length} chunks)`,
+    );
+  }
+
+  const moduleSettings = settings?.moduleSettings || {};
+  for (const chunk of resize.chunks) {
+    try {
+      const sceneRequest = createSceneRequest(chunk.start, chunk.end);
+      const compiledScene = compileSceneForCatchupPreflight(
+        sceneRequest,
+        !!moduleSettings.unhideBeforeMemory,
+      );
+      const validation = validateCompiledScene(compiledScene);
+      if (!validation.valid) {
+        return {
+          error: __st_t_tag`/stmb-catchup cannot run non-interactively because chunk ${chunk.start}-${chunk.end} cannot be compiled: ${validation.errors.join(", ")}`,
+          chunks: [],
+        };
+      }
+    } catch (error) {
+      return {
+        error: __st_t_tag`/stmb-catchup cannot run non-interactively because chunk ${chunk.start}-${chunk.end} cannot be compiled: ${error.message}`,
+        chunks: [],
+      };
+    }
+  }
+
+  return { error: null, chunks: resize.chunks };
+}
+
+/**
+ * Everything about the non-interactive preflight that does not depend on the
+ * chunk plan: profile/preview settings, lorebook binding, group bindings.
+ * Returns a blocker string, or null when the run may proceed.
+ */
+async function validateStmbCatchupPreconditions(settings) {
   const moduleSettings = settings?.moduleSettings || {};
 
   if (!moduleSettings.alwaysUseDefault) {
@@ -1437,30 +1541,6 @@ async function validateStmbCatchupNonInteractive(settings, chunks) {
   );
   if (!manualGroupLorebooks.valid) {
     return manualGroupLorebooks.error;
-  }
-
-  const tokenThreshold = moduleSettings.tokenWarningThreshold ?? 30000;
-
-  for (const chunk of chunks) {
-    try {
-      const sceneRequest = createSceneRequest(chunk.start, chunk.end);
-      const compiledScene = compileSceneForCatchupPreflight(
-        sceneRequest,
-        !!moduleSettings.unhideBeforeMemory,
-      );
-      const validation = validateCompiledScene(compiledScene);
-      if (!validation.valid) {
-        return __st_t_tag`/stmb-catchup cannot run non-interactively because chunk ${chunk.start}-${chunk.end} cannot be compiled: ${validation.errors.join(", ")}`;
-      }
-
-      const stats = await getSceneStats(compiledScene);
-      const estimatedTokens = Number(stats?.estimatedTokens ?? 0);
-      if (estimatedTokens > tokenThreshold) {
-        return __st_t_tag`/stmb-catchup is non-interactive. Chunk ${chunk.start}-${chunk.end} is estimated at ${estimatedTokens} tokens, above the token warning threshold (${tokenThreshold}). Increase the threshold or use a smaller interval.`;
-      }
-    } catch (error) {
-      return __st_t_tag`/stmb-catchup cannot run non-interactively because chunk ${chunk.start}-${chunk.end} cannot be compiled: ${error.message}`;
-    }
   }
 
   return null;
@@ -1613,7 +1693,7 @@ async function handleStmbCatchupCommand(namedArgs) {
       return "";
     }
 
-    const chunks = [];
+    let chunks = [];
     for (let chunkStart = startId; chunkStart <= endId; chunkStart += interval) {
       const chunkEnd = Math.min(chunkStart + interval - 1, endId);
       if (!chat[chunkStart] || !chat[chunkEnd]) {
@@ -1627,17 +1707,17 @@ async function handleStmbCatchupCommand(namedArgs) {
     }
 
     const settings = initializeSettings();
-    const interactiveBlocker = await validateStmbCatchupNonInteractive(
-      settings,
-      chunks,
-    );
-    if (interactiveBlocker) {
+    const preflight = await validateStmbCatchupNonInteractive(settings, chunks);
+    if (preflight.error) {
       toastr.error(
-        interactiveBlocker,
+        preflight.error,
         translate("STMemoryBooks", "index.toast.title"),
       );
       return "";
     }
+    // The preflight may have re-split oversized chunks to fit the budget; run
+    // what it approved, not what the interval originally produced.
+    chunks = preflight.chunks;
 
     toastr.info(
       __st_t_tag`STMB catch-up started: ${chunks.length} chunk${chunks.length === 1 ? "" : "s"}.`,
@@ -1858,14 +1938,27 @@ async function runStmbAutoPipeline(jobContext) {
   // closure over the caller, so there's nothing to reuse anyway.
   const highestProcessed = getHighestMemoryProcessed();
   const lastIndex = chat.length - 1;
-  const memoryChunks = planAutoMemoryChunks(highestProcessed, lastIndex, stmbAutoCfg.memoryInterval);
+  // PHA-1870: size the chunks from the context window unless the user pinned
+  // memoryInterval by hand. The old fixed 26-message interval was a proxy for
+  // size from before anything here could read the window; with a real budget a
+  // 256k model writes a few large scene memories instead of dozens of tiny,
+  // mutually-blind ones.
+  let memoryChunks = stmbAutoCfg.memoryIntervalPinned
+    ? planAutoMemoryChunks(highestProcessed, lastIndex, stmbAutoCfg.memoryInterval)
+    : planTokenBoundedMemoryChunks(
+        highestProcessed,
+        lastIndex,
+        chatTextAt,
+        resolveSceneMemoryBudget().inputTokens,
+      );
   let memoriesCreated = 0;
   let memorySkipReason = null;
   if (memoryChunks.length) {
-    const blocker = await validateStmbCatchupNonInteractive(settings, memoryChunks);
-    if (blocker) {
-      memorySkipReason = blocker;
+    const preflight = await validateStmbCatchupNonInteractive(settings, memoryChunks);
+    if (preflight.error) {
+      memorySkipReason = preflight.error;
     } else {
+      memoryChunks = preflight.chunks;
       reportPhase(
         __st_t_tag`STMB Auto: writing ${memoryChunks.length} scene memor${memoryChunks.length === 1 ? "y" : "ies"}…`,
       );
@@ -3997,7 +4090,12 @@ async function showAndGetMemorySettings(
   return {
     profileSettings,
     summaryCount: advancedOptions.memoryCount ?? 0,
-    tokenThreshold,
+    // PHA-1870: the confirmation popup above still triggers on the user's raw
+    // warning threshold, but what stmemory.createMemory HARD-FAILS on is the
+    // context-aware cap. A 150k-token chunk on a 256k model is inside the
+    // model's means; refusing to generate it would make context-sized scene
+    // chunks unusable.
+    tokenThreshold: Math.max(tokenThreshold, resolveSceneMemoryTokenCap(settings)),
     settings,
   };
 }

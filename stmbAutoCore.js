@@ -9,6 +9,8 @@
 // (auditorJobsCore.js). This file only decides WHAT to run, never runs it —
 // no ST imports, DI everywhere, so it is testable with plain node:test.
 
+import { estimateTokens, planTokenBoundedPasses } from './contextBudget.js';
+
 /**
  * Defaults for the auto-run. `memoryInterval` reuses the sentinel's
  * boundary-detection window size (autoSettings.js AUTO_MODULE_DEFAULTS.
@@ -40,6 +42,10 @@ export function resolveStmbAutoConfig(autoModule, chatMetadata) {
         if (global[key] != null) cfg[key] = global[key];
         if (perChat[key] != null) cfg[key] = perChat[key];
     }
+    // PHA-1870: same escape hatch the auditor uses. If the user pinned
+    // memoryInterval by hand we keep the legacy fixed-interval slicing; if they
+    // didn't, scene chunks get sized from the model's context window instead.
+    cfg.memoryIntervalPinned = global.memoryInterval != null || perChat.memoryInterval != null;
     return cfg;
 }
 
@@ -67,6 +73,92 @@ export function planAutoMemoryChunks(highestProcessed, lastIndex, interval) {
         chunks.push({ start: chunkStart, end: Math.min(chunkStart + step - 1, lastIndex) });
     }
     return chunks;
+}
+
+/**
+ * Build the {id, text} list for a message range, using a DI text accessor so
+ * this stays free of any SillyTavern import.
+ */
+function collectRange(start, lastIndex, getText) {
+    const messages = [];
+    for (let i = start; i <= lastIndex; i++) {
+        messages.push({ id: i, text: typeof getText === 'function' ? (getText(i) ?? '') : '' });
+    }
+    return messages;
+}
+
+/**
+ * Token-bounded variant of planAutoMemoryChunks (PHA-1870).
+ *
+ * The fixed 26-message interval was a proxy for size chosen when nothing in the
+ * fork could read the model's context window. Now that contextBudget.js can, a
+ * scene chunk is exactly "as much story as one call may hold": a 256k model
+ * writes a handful of large scene memories instead of dozens of tiny ones that
+ * cannot see each other.
+ *
+ * @param {number|null} highestProcessed - last message id already summarized, or null
+ * @param {number} lastIndex - index of the last message in the chat
+ * @param {function(number):string} getText - message text by chat index
+ * @param {number} tokensPerChunk - budget per chunk (contextBudget inputTokens)
+ * @param {function} [estimator]
+ * @returns {Array<{start:number, end:number, tokens:number}>}
+ */
+export function planTokenBoundedMemoryChunks(highestProcessed, lastIndex, getText, tokensPerChunk, estimator = estimateTokens) {
+    if (!Number.isInteger(lastIndex) || lastIndex < 0) return [];
+    const start = Number.isFinite(highestProcessed) ? highestProcessed + 1 : 0;
+    if (start > lastIndex) return [];
+
+    const passes = planTokenBoundedPasses(collectRange(start, lastIndex, getText), tokensPerChunk, estimator);
+    return passes.map(p => ({ start: start + p.start, end: start + p.end, tokens: p.tokens }));
+}
+
+/**
+ * Re-split any chunk that exceeds `tokenCap` so it fits (PHA-1870).
+ *
+ * This replaces the old behaviour at the non-interactive token gate, which
+ * ABORTED the whole run when a chunk came in over the warning threshold. An
+ * oversized chunk is a sizing mistake, not a user error: the fix is to cut it
+ * smaller and carry on. The only genuinely unrunnable case is a SINGLE message
+ * that alone exceeds the cap — nothing can make that fit, so it is reported
+ * back as `oversized` and the caller aborts on that alone.
+ *
+ * @param {Array<{start:number, end:number}>} chunks
+ * @param {function(number):string} getText
+ * @param {number} tokenCap
+ * @param {function} [estimator]
+ * @returns {{chunks:Array<{start:number,end:number,tokens:number}>,
+ *            oversized:Array<{id:number, tokens:number}>, resized:boolean}}
+ */
+export function resizeChunksToBudget(chunks, getText, tokenCap, estimator = estimateTokens) {
+    const list = Array.isArray(chunks) ? chunks : [];
+    const cap = Number.isFinite(tokenCap) && tokenCap > 0 ? Math.floor(tokenCap) : 0;
+    const out = [];
+    const oversized = [];
+    let resized = false;
+
+    for (const chunk of list) {
+        const start = Number(chunk?.start);
+        const end = Number(chunk?.end);
+        if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) continue;
+
+        const messages = collectRange(start, end, getText);
+        const total = messages.reduce((sum, m) => sum + Math.max(1, estimator(m.text) || 1), 0);
+        if (!cap || total <= cap) {
+            out.push({ start, end, tokens: total });
+            continue;
+        }
+
+        resized = true;
+        for (const pass of planTokenBoundedPasses(messages, cap, estimator)) {
+            const sub = { start: start + pass.start, end: start + pass.end, tokens: pass.tokens };
+            if (pass.start === pass.end && pass.tokens > cap) {
+                oversized.push({ id: sub.start, tokens: pass.tokens });
+            }
+            out.push(sub);
+        }
+    }
+
+    return { chunks: out, oversized, resized };
 }
 
 /**
