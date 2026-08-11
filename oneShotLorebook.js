@@ -207,7 +207,10 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
                         order: entry.order,
                         position: entry.position,
                         scanDepth: entry.scanDepth,
-                        preventRecursion: true,
+                        preventRecursion: entry.preventRecursion,
+                        caseSensitive: entry.caseSensitive,
+                        probability: entry.probability,
+                        useProbability: entry.useProbability,
                         // Keyless entries can still be reached by vector matching.
                         vectorized: true,
                         selective: entry.keysecondary.length > 0,

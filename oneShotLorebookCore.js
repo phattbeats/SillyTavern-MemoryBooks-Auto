@@ -21,6 +21,7 @@
 // auditorCore.js ↔ auditor.js.
 
 import { formatAuditMessage } from './auditorCore.js';
+import { WORLD_INFO_PRIMER } from './worldInfoPrimer.js';
 
 // ---------------------------------------------------------------- defaults
 
@@ -62,94 +63,45 @@ export const INSERTION_POSITION = Object.freeze({
 /**
  * The whole-story prompt.
  *
- * PHA-1862's original complaint was that the fork's prompts never say EXACTLY
- * what a good World Info entry looks like, so this one spells out the field
- * semantics from the current SillyTavern World Info docs:
- *
- *   key            — primary trigger keywords. Case-insensitive, matched against
- *                    the recent chat buffer. Plaintext keys cannot contain commas.
- *   keysecondary   — optional filter, only meaningful together with selectiveLogic.
- *   selectiveLogic — 0 AND ANY, 1 NOT ALL, 2 NOT ANY, 3 AND ALL.
- *   constant       — true = always inserted, no keyword needed (blue circle).
- *   order          — priority; LOWER inserts earlier, higher lands closer to the end.
- *   position       — 0 before char defs, 1 after char defs, 4 at depth.
- *   scanDepth      — how many recent messages to scan for this entry's keys.
- *   preventRecursion — once inserted, this entry cannot trigger others.
+ * PHA-1862's original complaint had two halves. The one-shot path (PHA-1871)
+ * fixed the first — writers could finally see each other. This prompt fixes
+ * the second: WORLD_INFO_PRIMER (PHA-1915) tells the model what World Info
+ * actually is and what makes a keyword good, ahead of anything else, so it is
+ * the ideal cache prefix. The model emits a compact six-field shape (name,
+ * keys, content, caseSensitive, cascade, throttle) rather than SillyTavern's
+ * own ~28-field entry schema — parseOneShotEntries assembles the rest of the
+ * real entry around those six fields, so a malformed `preventRecursion` or
+ * `position` is structurally impossible rather than something to validate.
  *
  * {{TRANSCRIPT}} {{EXISTING}} {{MAX_ENTRIES}} are filled by buildOneShotPrompt.
  */
 export const ONE_SHOT_PROMPT =
-`You are building the COMPLETE SillyTavern World Info lorebook for the story below.
-You can see the ENTIRE story and the ENTIRE existing lorebook at once, so you are
+`${WORLD_INFO_PRIMER}
+
+THIS TASK
+You are building the COMPLETE World Info lorebook for the story below. You can
+see the ENTIRE story and the ENTIRE existing lorebook at once, so you are
 responsible for the whole entry set being mutually consistent. This is the only
 call that will be made — nothing downstream will reconcile your entries.
-
-WHAT A GOOD ENTRY LOOKS LIKE
-Each entry is one JSON object. Field semantics (SillyTavern World Info):
-- "title": the entry memo/label. Not sent to the AI and not a trigger; it exists
-  so a human can find the entry. Use the subject's canonical name.
-- "content": the text actually inserted into the prompt when the entry fires.
-  Keywords and the title are NOT inserted, so content must be COMPLETELY
-  SELF-CONTAINED: name the subject in the first sentence and never write "he",
-  "the above", or "as mentioned". Concise and factual — every token here is taken
-  out of the context budget. 3-8 sentences. Present tense for standing facts.
-  Ground every claim in the transcript; do NOT invent anything.
-- "key": the primary trigger keywords, an array of strings. Matching is
-  case-insensitive and by whole word. Plaintext keys MUST NOT contain commas.
-  List ONLY names/aliases/nicknames/titles that refer to THIS subject —
-  typically 2-5. A keyword must be unique across the ENTIRE lorebook: if two
-  entries share a keyword, both fire on every unrelated mention and burn the
-  budget. When two subjects could claim the same word (a surname shared by a
-  family, a place named after a person), give the shared word to exactly ONE
-  entry — the one it most specifically identifies — and give the other entry a
-  disambiguated form instead. Never use a generic common word ("the king",
-  "home", "sword") as a key unless it uniquely identifies this subject in this
-  story.
-- "keysecondary": optional extra keywords used as a FILTER on top of "key".
-  Leave it as [] unless the primary key is genuinely ambiguous. It does nothing
-  on its own.
-- "selectiveLogic": how keysecondary combines with key. 0 = AND ANY (fire if key
-  and any secondary match), 1 = NOT ALL, 2 = NOT ANY (fire only if no secondary
-  matches — use this to suppress a homonym), 3 = AND ALL. Use 0 when
-  keysecondary is empty.
-- "constant": true means the entry is ALWAYS inserted with no keyword needed.
-  Reserve this for at most 1-2 entries that are load-bearing for every scene
-  (the world premise, the current status quo). Everything else MUST be false —
-  constant entries permanently consume budget.
-- "order": insertion priority. LOWER numbers are inserted EARLIER in the
-  context; higher numbers land closer to the end and carry more weight. Use 100
-  for ordinary entries, 200 for entries that should dominate (the premise,
-  hard rules), 50 for background colour.
-- "position": 0 = before the character definition, 1 = after it. Use 1 for
-  entries about the main characters and the current situation (greater
-  influence), 0 for background world/location lore.
-- "scanDepth": how many recent messages are scanned for this entry's keys.
-  Use 2-4 for people and things that come and go; use a larger value only for
-  entries that must survive a lull in mentions.
-- "preventRecursion": true means this entry, once inserted, cannot trigger
-  other entries. Set it to true for every entry here: these entries name each
-  other in their own content, and without it one insertion cascades into all
-  the others.
-- "kind": one of "character", "location", "faction", "item", "event", "concept".
 
 RULES
 1. Cover every subject the story actually establishes, and nothing it does not.
    Do not create an entry for a one-off mention with no substance behind it.
 2. Produce AT MOST {{MAX_ENTRIES}} entries. If the story has more subjects than
    that, keep the ones that recur and matter and drop the rest.
-3. The EXISTING LOREBOOK below is already in the book. Reuse an existing entry's
-   exact "title" to UPDATE it (write the improved full content — it will be
-   replaced, not merged). Use a new title to create a new entry. Never create a
-   second entry for a subject that already has one.
+3. The EXISTING LOREBOOK below is already in the book. Reuse an existing
+   entry's exact "name" to UPDATE it (write the improved full content — it
+   will be replaced, not merged). Use a new name to create a new entry. Never
+   create a second entry for a subject that already has one.
 4. Keywords must not collide with the keywords already claimed by existing
    entries, listed below. Treat those as taken.
 5. Do not write entries about the user's own persona's private thoughts, and do
    not summarize the plot beat by beat — that is what memory entries are for.
 
 Reply with ONLY a JSON object of exactly this shape — no prose, no code fences:
-{"entries":[{"title":"","kind":"","key":[],"keysecondary":[],"selectiveLogic":0,"constant":false,"order":100,"position":1,"scanDepth":3,"preventRecursion":true,"content":""}]}
+{"entries":[{"name":"","keys":[],"content":"","caseSensitive":false,"cascade":false,"throttle":100}]}
 
-EXISTING LOREBOOK (titles and the keywords they already claim):
+EXISTING LOREBOOK (names and the keywords they already claim):
 {{EXISTING}}
 
 STORY TRANSCRIPT (every message, numbered "[id] Speaker: text"):
@@ -157,7 +109,7 @@ STORY TRANSCRIPT (every message, numbered "[id] Speaker: text"):
 
 /** Reprimand appended on the single retry when the first reply is unusable. */
 export const ONE_SHOT_JSON_ONLY_REPRIMAND =
-    'Reply with ONLY the JSON object described: {"entries":[{"title":"","kind":"","key":[],"keysecondary":[],"selectiveLogic":0,"constant":false,"order":100,"position":1,"scanDepth":3,"preventRecursion":true,"content":""}]}. No prose, no code fences.';
+    'Reply with ONLY the JSON object described: {"entries":[{"name":"","keys":[],"content":"","caseSensitive":false,"cascade":false,"throttle":100}]}. No prose, no code fences.';
 
 // ---------------------------------------------------------------- formatting
 
@@ -252,7 +204,7 @@ export function salvageEntryObjects(text) {
         if (stack.length > 1) continue;
         try {
             const obj = JSON.parse(s.slice(start, i + 1));
-            if (obj && typeof obj === 'object' && !Array.isArray(obj) && typeof obj.title === 'string') out.push(obj);
+            if (obj && typeof obj === 'object' && !Array.isArray(obj) && typeof obj.name === 'string') out.push(obj);
         } catch { /* not a complete object */ }
     }
     return out;
@@ -279,13 +231,19 @@ function extractJsonObject(reply) {
 }
 
 /**
- * Parse and sanitize a one-shot reply into the entry set.
+ * Parse and sanitize a reply into the entry set.
  *
- * Every field is clamped to something SillyTavern will actually accept, because
- * these values are written straight onto a world info entry: a model that emits
- * `"position": 9` or `"selectiveLogic": "AND ANY"` must not corrupt the book.
- * Entries without a title or without usable content are dropped rather than
- * guessed at — a partial book beats a book full of placeholders.
+ * The whole-story path (oneShotLorebook.js) emits the compact six-field shape
+ * from WORLD_INFO_PRIMER: name, keys, content, caseSensitive, cascade,
+ * throttle. Everything else SillyTavern needs is assembled here from a
+ * known-good template, so a malformed field is structurally impossible rather
+ * than something to clamp. The older per-entity chunked walk
+ * (chunkedLorebookCore.js) shares this parser but still runs its own prompt
+ * asking for the ST-shaped fields directly (kind, key, selectiveLogic,
+ * constant, order, position, scanDepth) — both are read here, new shape
+ * preferred, so this function stays a single source of truth for either
+ * caller. Entries without a name or without usable content are dropped rather
+ * than guessed at — a partial book beats a book full of placeholders.
  *
  * @returns {{entries:Array<object>, dropped:number}|null} null when nothing parsed
  */
@@ -308,10 +266,10 @@ export function parseOneShotEntries(reply, cfg = {}) {
 
     for (const item of raw) {
         if (!item || typeof item !== 'object') { dropped++; continue; }
-        const title = String(item.title ?? '').trim();
+        const title = String(item.name ?? item.title ?? '').trim();
         const content = String(item.content ?? '').trim();
         if (!title || content.length < minContent) { dropped++; continue; }
-        // A duplicate title inside one reply would make the two entries fight
+        // A duplicate name inside one reply would make the two entries fight
         // over the same upsert target; keep the first, drop the rest.
         const titleKey = title.toLowerCase();
         if (seenTitles.has(titleKey)) { dropped++; continue; }
@@ -320,11 +278,18 @@ export function parseOneShotEntries(reply, cfg = {}) {
         // Plaintext keys cannot contain commas (ST treats them as separators),
         // so split rather than silently shipping an unmatchable key.
         const splitKeys = (v) => strList(v).flatMap(k => k.split(',').map(x => x.trim()).filter(Boolean));
+        const keysSource = item.keys !== undefined ? item.keys : item.key;
+
+        // throttle (0-100, "how often this fires on a match") maps onto ST's
+        // probability gate; 100 means the gate never needs to roll at all, and
+        // is also the correct default when a caller (the chunked walk) never
+        // sends throttle at all.
+        const throttle = clampInt(item.throttle, 100, 0, 100);
 
         out.push({
             title,
             kind: String(item.kind ?? '').trim().toLowerCase() || 'concept',
-            key: splitKeys(item.key).length ? splitKeys(item.key) : [title],
+            key: splitKeys(keysSource).length ? splitKeys(keysSource) : [title],
             keysecondary: splitKeys(item.keysecondary),
             selectiveLogic: clampInt(item.selectiveLogic, SELECTIVE_LOGIC.AND_ANY, 0, 3),
             constant: item.constant === true,
@@ -336,9 +301,14 @@ export function parseOneShotEntries(reply, cfg = {}) {
                 ? Number(item.position)
                 : INSERTION_POSITION.AFTER_CHAR,
             scanDepth: clampInt(item.scanDepth, 3, 1, 100),
-            // Always on: these entries name each other, so recursion would make
-            // one insertion cascade into the whole book.
-            preventRecursion: true,
+            // cascade:true lets this entry's insertion trigger other entries;
+            // default false (and always false for the chunked walk, which never
+            // sends "cascade"), since these entries name each other constantly
+            // and without this one match would otherwise cascade into a dozen.
+            preventRecursion: item.cascade !== true,
+            caseSensitive: item.caseSensitive === true,
+            probability: throttle,
+            useProbability: throttle < 100,
             content,
         });
         if (out.length >= maxEntries) break;
@@ -475,10 +445,8 @@ export function enforceGlobalKeywordUniqueness(entries, claimedByExisting = new 
             // deterministic disambiguated form first (PHA-1886 §4); only a title
             // that collides even when qualified gives up.
             const title = String(entry.title ?? '').trim();
-            const kind = String(entry.kind ?? '').trim();
             const candidates = title ? [title] : [];
-            if (title && kind) candidates.push(`${title} (${kind})`);
-            if (title) for (let n = 2; n <= 9; n++) candidates.push(`${title} (${kind || 'entry'} ${n})`);
+            if (title) for (let n = 2; n <= 9; n++) candidates.push(`${title} (entry ${n})`);
 
             const free = candidates.find((c) => {
                 const n = normalizeKeyword(c);
