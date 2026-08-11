@@ -27,9 +27,10 @@ import {
     summarizeOneShot,
 } from './oneShotLorebookCore.js';
 
+// The internal, already-parsed entry shape — used directly against the
+// keyword-uniqueness / memory-collision helpers, which never see raw model JSON.
 const entry = (over = {}) => ({
     title: 'X',
-    kind: 'character',
     key: ['x'],
     keysecondary: [],
     selectiveLogic: 0,
@@ -42,18 +43,35 @@ const entry = (over = {}) => ({
     ...over,
 });
 
+// The model's compact six-field output shape (PHA-1915) — used inside reply()
+// to simulate what parseOneShotEntries actually receives.
+const rawEntry = (over = {}) => ({
+    name: 'X',
+    keys: ['x'],
+    content: 'x'.repeat(60),
+    caseSensitive: false,
+    cascade: false,
+    throttle: 100,
+    ...over,
+});
+
 const reply = (entries) => JSON.stringify({ entries });
 
 // ---------------------------------------------------------------- prompt
 
-test('the prompt spells out the World Info field semantics PHA-1862 asked for', () => {
-    for (const token of ['selectiveLogic', 'keysecondary', 'constant', 'preventRecursion', 'scanDepth', 'position', 'order']) {
-        assert.ok(ONE_SHOT_PROMPT.includes(token), `prompt must document "${token}"`);
+test('the prompt leads with the World Info primer and the six-field output shape', () => {
+    assert.ok(ONE_SHOT_PROMPT.startsWith('SILLYTAVERN WORLD INFO'), 'the primer must be first — it is the cache prefix');
+    for (const token of ['MECHANISM', 'OUTPUT SHAPE', 'KEYWORD RULES', 'CASCADE AND THROTTLE']) {
+        assert.ok(ONE_SHOT_PROMPT.includes(token), `primer must document "${token}"`);
     }
-    // The two semantics that are easy to get backwards.
-    assert.match(ONE_SHOT_PROMPT, /LOWER numbers are inserted EARLIER/);
-    assert.match(ONE_SHOT_PROMPT, /0 = AND ANY/);
-    assert.match(ONE_SHOT_PROMPT, /SELF-CONTAINED/);
+    assert.match(ONE_SHOT_PROMPT, /"name":"","keys":\[\],"content":"","caseSensitive":false,"cascade":false,"throttle":100/);
+    // The model's own schema, not SillyTavern's ~28-field entry, must be the
+    // OUTPUT SHAPE — "preventRecursion" is allowed to appear only as an example
+    // of a field the model must NOT emit.
+    for (const stField of ['selectiveLogic', 'scanDepth', '"position"', '"order"']) {
+        assert.ok(!ONE_SHOT_PROMPT.includes(stField), `ST-internal field "${stField}" must not be asked of the model`);
+    }
+    assert.match(ONE_SHOT_PROMPT, /no preventRecursion/);
 });
 
 test('buildOneShotPrompt fills every token and marks an empty book', () => {
@@ -80,7 +98,7 @@ test('formatTranscript / formatExistingEntries render the two context blocks', (
 // ---------------------------------------------------------------- parsing
 
 test('parseOneShotEntries accepts a bare object, a fence, and surrounding prose', () => {
-    const body = reply([entry({ title: 'Ada' })]);
+    const body = reply([rawEntry({ name: 'Ada' })]);
     for (const variant of [body, '```json\n' + body + '\n```', 'Sure!\n' + body + '\nHope that helps.']) {
         const parsed = parseOneShotEntries(variant);
         assert.equal(parsed.entries.length, 1, variant.slice(0, 20));
@@ -90,31 +108,39 @@ test('parseOneShotEntries accepts a bare object, a fence, and surrounding prose'
     assert.equal(parseOneShotEntries(reply([])), null);
 });
 
-test('parseOneShotEntries clamps every field into something World Info accepts', () => {
-    const parsed = parseOneShotEntries(reply([entry({
-        title: 'Ada',
-        selectiveLogic: 'AND ANY',   // not a number
-        position: 9,                 // out of range
-        order: -5,
-        scanDepth: 9999,
-        constant: 'yes',             // not a boolean
-        preventRecursion: false,     // must be forced back on
+test('parseOneShotEntries assembles the full ST entry from the six model fields', () => {
+    const parsed = parseOneShotEntries(reply([rawEntry({
+        name: 'Ada',
+        caseSensitive: true,
+        cascade: true,
+        throttle: 500,   // out of range
     })]));
     const e = parsed.entries[0];
-    assert.equal(e.selectiveLogic, SELECTIVE_LOGIC.AND_ANY);
+    assert.equal(e.selectiveLogic, SELECTIVE_LOGIC.AND_ANY, 'assembled, not asked of the model');
     assert.equal(e.position, 1);
-    assert.equal(e.order, 0);
-    assert.equal(e.scanDepth, 100);
-    assert.equal(e.constant, false, 'only a real boolean true makes an entry constant');
-    assert.equal(e.preventRecursion, true, 'always forced on — these entries name each other');
+    assert.equal(e.order, 100);
+    assert.equal(e.scanDepth, 3);
+    assert.equal(e.constant, false);
+    assert.equal(e.caseSensitive, true);
+    assert.equal(e.preventRecursion, false, 'cascade:true means this entry MAY trigger others');
+    assert.equal(e.probability, 100, 'throttle clamped into 0-100');
+    assert.equal(e.useProbability, false, 'throttle:100 never needs the probability roll');
+});
+
+test('parseOneShotEntries maps cascade:false to preventRecursion:true, and throttle below 100 to useProbability', () => {
+    const parsed = parseOneShotEntries(reply([rawEntry({ name: 'Ada', cascade: false, throttle: 80 })]));
+    const e = parsed.entries[0];
+    assert.equal(e.preventRecursion, true);
+    assert.equal(e.probability, 80);
+    assert.equal(e.useProbability, true);
 });
 
 test('parseOneShotEntries drops junk instead of guessing', () => {
     const parsed = parseOneShotEntries(reply([
-        entry({ title: 'Ada' }),
-        entry({ title: '', content: 'x'.repeat(60) }),  // no title
-        entry({ title: 'Tiny', content: 'too short' }), // below minContentChars
-        entry({ title: 'ada' }),                        // duplicate title, different case
+        rawEntry({ name: 'Ada' }),
+        rawEntry({ name: '', content: 'x'.repeat(60) }),  // no name
+        rawEntry({ name: 'Tiny', content: 'too short' }), // below minContentChars
+        rawEntry({ name: 'ada' }),                        // duplicate name, different case
         'not an object',
     ]));
     assert.deepEqual(parsed.entries.map(e => e.title), ['Ada']);
@@ -122,16 +148,16 @@ test('parseOneShotEntries drops junk instead of guessing', () => {
 });
 
 test('parseOneShotEntries splits comma-packed keys — ST treats commas as separators', () => {
-    const parsed = parseOneShotEntries(reply([entry({ title: 'Ada', key: ['Ada, Lovelace', ' Countess '] })]));
+    const parsed = parseOneShotEntries(reply([rawEntry({ name: 'Ada', keys: ['Ada, Lovelace', ' Countess '] })]));
     assert.deepEqual(parsed.entries[0].key, ['Ada', 'Lovelace', 'Countess']);
 });
 
-test('parseOneShotEntries falls back to the title when no key survives, and honours maxEntries', () => {
-    const noKey = parseOneShotEntries(reply([entry({ title: 'Ada', key: [] })]));
+test('parseOneShotEntries falls back to the name when no key survives, and honours maxEntries', () => {
+    const noKey = parseOneShotEntries(reply([rawEntry({ name: 'Ada', keys: [] })]));
     assert.deepEqual(noKey.entries[0].key, ['Ada']);
 
     const capped = parseOneShotEntries(
-        reply([entry({ title: 'A' }), entry({ title: 'B' }), entry({ title: 'C' })]),
+        reply([rawEntry({ name: 'A' }), rawEntry({ name: 'B' }), rawEntry({ name: 'C' })]),
         { maxEntries: 2 },
     );
     assert.equal(capped.entries.length, 2);
@@ -192,24 +218,24 @@ test('the existing book always wins — an incumbent keyword is stripped from ev
 test('an entry whose every keyword AND title is taken falls back to a disambiguated key', () => {
     const claimed = collectClaimedKeywords([{ title: 'incumbent', keys: ['ghost', 'Ada'] }]);
     const { entries } = enforceGlobalKeywordUniqueness([entry({ title: 'Ada', key: ['ghost'] })], claimed);
-    assert.deepEqual(entries[0].key, ['Ada (character)']);
+    assert.deepEqual(entries[0].key, ['Ada (entry 2)']);
     assert.equal(entries[0].keywordless, undefined);
 });
 
 test('two entries contesting the same title get distinct disambiguated keys', () => {
-    const claimed = collectClaimedKeywords([{ title: 'incumbent', keys: ['ghost', 'Ada', 'Ada (character)'] }]);
+    const claimed = collectClaimedKeywords([{ title: 'incumbent', keys: ['ghost', 'Ada', 'Ada (entry 2)'] }]);
     const { entries } = enforceGlobalKeywordUniqueness([
         entry({ title: 'Ada', key: ['ghost'] }),
         entry({ title: 'Ada', key: ['ghost'] }),
     ], claimed);
-    assert.deepEqual(entries[0].key, ['Ada (character 2)']);
-    assert.deepEqual(entries[1].key, ['Ada (character 3)']);
+    assert.deepEqual(entries[0].key, ['Ada (entry 3)']);
+    assert.deepEqual(entries[1].key, ['Ada (entry 4)']);
     assert.notDeepEqual(entries[0].key, entries[1].key);
 });
 
 test('an entry is only marked keywordless when even the disambiguated forms are taken', () => {
-    const taken = ['ghost', 'Ada', 'Ada (character)'];
-    for (let n = 2; n <= 9; n++) taken.push(`Ada (character ${n})`);
+    const taken = ['ghost', 'Ada'];
+    for (let n = 2; n <= 9; n++) taken.push(`Ada (entry ${n})`);
     const claimed = collectClaimedKeywords([{ title: 'incumbent', keys: taken }]);
     const { entries } = enforceGlobalKeywordUniqueness([entry({ title: 'Ada', key: ['ghost'] })], claimed);
     assert.deepEqual(entries[0].key, []);
@@ -247,16 +273,16 @@ test('dropMemoryTitleCollisions is a no-op when the book has no scene memories',
 // PHA-1886 §3
 test('salvageEntryObjects recovers the complete entries from a truncated reply', () => {
     const truncated = '{"entries": [' +
-        '{"title": "Mira", "content": "Mira is a } brace inside a string", "key": ["Mira"]},' +
-        '{"title": "Kell", "content": "Kell guards the gate.", "key": ["Kell"]},' +
-        '{"title": "Ashfa';
+        '{"name": "Mira", "content": "Mira is a } brace inside a string", "keys": ["Mira"]},' +
+        '{"name": "Kell", "content": "Kell guards the gate.", "keys": ["Kell"]},' +
+        '{"name": "Ashfa';
     const got = salvageEntryObjects(truncated);
-    assert.deepEqual(got.map(e => e.title), ['Mira', 'Kell']);
+    assert.deepEqual(got.map(e => e.name), ['Mira', 'Kell']);
 });
 
 test('parseOneShotEntries salvages a max_tokens-truncated reply instead of losing everything', () => {
-    const body = (t) => `{"title": "${t}", "kind": "character", "content": "${'a'.repeat(60)}", "key": ["${t}"]}`;
-    const truncated = `{"entries": [${body('Mira')}, ${body('Kell')}, {"title": "Ashfa`;
+    const body = (t) => `{"name": "${t}", "content": "${'a'.repeat(60)}", "keys": ["${t}"]}`;
+    const truncated = `{"entries": [${body('Mira')}, ${body('Kell')}, {"name": "Ashfa`;
     const parsed = parseOneShotEntries(truncated);
     assert.ok(parsed, 'a truncated reply must not parse as null');
     assert.deepEqual(parsed.entries.map(e => e.title), ['Mira', 'Kell']);
@@ -295,7 +321,7 @@ test('generateOneShotEntries retries once with the JSON-only reprimand', async (
         prompt: 'P',
         generate: async (p) => {
             prompts.push(p);
-            return prompts.length === 1 ? 'sorry, here is some prose' : reply([entry({ title: 'Ada' })]);
+            return prompts.length === 1 ? 'sorry, here is some prose' : reply([rawEntry({ name: 'Ada' })]);
         },
     });
     assert.equal(prompts.length, 2);
@@ -323,11 +349,11 @@ test('ACCEPTANCE: one run produces zero cross-entry keyword collisions, post-hoc
     // member claims, a location named after a person, and keywords the existing
     // book already owns. Nothing downstream is allowed to clean this up.
     const modelReply = reply([
-        entry({ title: 'Elder Maxson', key: ['Maxson', 'Elder', 'Brotherhood of Steel'] }),
-        entry({ title: 'Sarah Maxson', key: ['Maxson', 'Sarah', 'Brotherhood of Steel'] }),
-        entry({ title: 'Brotherhood of Steel', key: ['Brotherhood of Steel', 'the Brotherhood', 'Elder'] }),
-        entry({ title: 'Maxson Bridge', key: ['Maxson Bridge', 'Maxson', 'the bridge'] }),
-        entry({ title: 'The Citadel', key: ['Citadel', 'Ada'] }),   // "Ada" belongs to the book already
+        rawEntry({ name: 'Elder Maxson', keys: ['Maxson', 'Elder', 'Brotherhood of Steel'] }),
+        rawEntry({ name: 'Sarah Maxson', keys: ['Maxson', 'Sarah', 'Brotherhood of Steel'] }),
+        rawEntry({ name: 'Brotherhood of Steel', keys: ['Brotherhood of Steel', 'the Brotherhood', 'Elder'] }),
+        rawEntry({ name: 'Maxson Bridge', keys: ['Maxson Bridge', 'Maxson', 'the bridge'] }),
+        rawEntry({ name: 'The Citadel', keys: ['Citadel', 'Ada'] }),   // "Ada" belongs to the book already
     ]);
 
     const existingBook = [
