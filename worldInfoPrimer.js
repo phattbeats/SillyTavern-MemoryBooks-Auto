@@ -17,16 +17,19 @@
 // model asked for six fields cannot. oneShotLorebookCore.parseOneShotEntries
 // assembles the real ST entry around that six-field core.
 //
-// TODO(verify-against-st-commit): the intended provenance header for this file
-// is "verified against ST commit <sha>", cross-checked against the
-// `sillytavern-lorebook` skill's references/st-json-schema.md (recursion and
-// probability field semantics). That skill and an upstream ST checkout were not
-// available in the environment this file was authored in, so the SHA below is
-// left unfilled rather than guessed — fill it in from a real `git rev-parse` of
-// the vendored/upstream SillyTavern checkout the next time this file is edited,
-// and re-check KEYWORD RULES / CASCADE AND THROTTLE against world-info.js's
-// `checkWorldInfo` (keyword scan) and recursion pass at that commit.
-// Verified against SillyTavern World Info semantics as of upstream commit: TBD
+// PHA-1917: cross-checked directly against a shallow clone of upstream
+// SillyTavern/SillyTavern (public/scripts/world-info.js) at the commit below.
+// Confirmed: WorldInfoBuffer + scanDepth/getDepth implement the "scans recent
+// chat, entry drops out once its keyword scrolls out of the scan window"
+// mechanism described above; cascade:false -> preventRecursion:true (ST's
+// preventRecursion default is false, i.e. ST cascades by default, which is
+// why oneShotLorebookCore.js inverts it) matches world-info.js's
+// newWorldInfoEntryTemplate defaults (preventRecursion default false,
+// probability default 100, useProbability default true) and the
+// extensions.prevent_recursion / extensions.probability / extensions.case_sensitive
+// field names entries are serialized to. throttle -> probability/useProbability
+// and caseSensitive map 1:1 onto ST's own fields of the same semantics.
+// Verified against SillyTavern World Info semantics as of upstream commit: 8172dcd0ee672d3cd9a5e5f7af134f91a45cd2b8
 
 export const WORLD_INFO_PRIMER_VERSION = 1;
 
