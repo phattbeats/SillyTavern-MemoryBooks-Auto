@@ -899,15 +899,18 @@ export function registerAuditorJobs(stmbJobsApi, opts = {}) {
     const showClaims = opts.showClaimReverificationPopup;
 
     // Coverage audit
-    stmbJobsApi.registerStmbJobExecutor('stmbc-audit-coverage', async (job) => {
+    stmbJobsApi.registerStmbJobExecutor('stmbc-audit-coverage', async (job, context) => {
         const input = job?.input ?? job?.payload ?? {};
         const lorebookData = input.lorebookData ?? input.lorebook ?? null;
         const notes = input.notes ?? null;
         const options = input.options ?? {};
         const report = runCoverageAudit(notes, lorebookData, options);
         if (typeof showCoverage === 'function' && typeof stmbJobsApi.awaitStmbJobApproval === 'function') {
-            const context = job?.context ?? job;
-            const approval = await stmbJobsApi.awaitStmbJobApproval(context, {
+            // stmbJobs invokes executors as (job, context). The job record is
+            // deliberately data-only; approval needs the live context because
+            // it owns state transitions and carries context.job.
+            const approvalContext = context?.job?.id ? context : job?.context ?? job;
+            const approval = await stmbJobsApi.awaitStmbJobApproval(approvalContext, {
                 kind: 'coverageReport',
                 title: 'Coverage Audit',
                 detail: `${report.summary.flagged} item${report.summary.flagged === 1 ? '' : 's'} need attention.`,
@@ -924,15 +927,15 @@ export function registerAuditorJobs(stmbJobsApi, opts = {}) {
     });
 
     // Entry regeneration
-    stmbJobsApi.registerStmbJobExecutor('stmbc-audit-regenerate', async (job) => {
+    stmbJobsApi.registerStmbJobExecutor('stmbc-audit-regenerate', async (job, context) => {
         const input = job?.input ?? job?.payload ?? {};
         const lorebookData = input.lorebookData ?? input.lorebook ?? null;
         const chatSlice = input.chatSlice ?? null;
         const options = input.options ?? {};
         const report = runEntryRegeneration(lorebookData, chatSlice, options);
         if (typeof showRegen === 'function' && typeof stmbJobsApi.awaitStmbJobApproval === 'function') {
-            const context = job?.context ?? job;
-            const approval = await stmbJobsApi.awaitStmbJobApproval(context, {
+            const approvalContext = context?.job?.id ? context : job?.context ?? job;
+            const approval = await stmbJobsApi.awaitStmbJobApproval(approvalContext, {
                 kind: 'regenerationReport',
                 title: 'Entry Regeneration',
                 detail: `${report.summary.changed} drifted entr${report.summary.changed === 1 ? 'y' : 'ies'}.`,
@@ -949,15 +952,15 @@ export function registerAuditorJobs(stmbJobsApi, opts = {}) {
     });
 
     // Technical pass (existing P5.3 path)
-    stmbJobsApi.registerStmbJobExecutor('stmbc-audit-technical', async (job) => {
+    stmbJobsApi.registerStmbJobExecutor('stmbc-audit-technical', async (job, context) => {
         const input = job?.input ?? job?.payload ?? {};
         const lorebookData = input.lorebookData ?? input.lorebook ?? null;
         const chatSlice = input.chatSlice ?? null;
         const options = input.options ?? {};
         const report = runTechnicalPass(lorebookData, options);
         if (typeof showTechnical === 'function' && typeof stmbJobsApi.awaitStmbJobApproval === 'function') {
-            const context = job?.context ?? job;
-            const approval = await stmbJobsApi.awaitStmbJobApproval(context, {
+            const approvalContext = context?.job?.id ? context : job?.context ?? job;
+            const approval = await stmbJobsApi.awaitStmbJobApproval(approvalContext, {
                 kind: 'technicalReport',
                 title: 'Technical Pass',
                 detail: `${report.summary.flaggedEntries} flagged entr${report.summary.flaggedEntries === 1 ? 'y' : 'ies'}.`,
@@ -974,15 +977,15 @@ export function registerAuditorJobs(stmbJobsApi, opts = {}) {
     });
 
     // Claim re-verification
-    stmbJobsApi.registerStmbJobExecutor('stmbc-audit-claims', async (job) => {
+    stmbJobsApi.registerStmbJobExecutor('stmbc-audit-claims', async (job, context) => {
         const input = job?.input ?? job?.payload ?? {};
         const lorebookData = input.lorebookData ?? input.lorebook ?? null;
         const chatSlice = input.chatSlice ?? null;
         const options = input.options ?? {};
         const report = runClaimReverification(lorebookData, chatSlice, options);
         if (typeof showClaims === 'function' && typeof stmbJobsApi.awaitStmbJobApproval === 'function') {
-            const context = job?.context ?? job;
-            const approval = await stmbJobsApi.awaitStmbJobApproval(context, {
+            const approvalContext = context?.job?.id ? context : job?.context ?? job;
+            const approval = await stmbJobsApi.awaitStmbJobApproval(approvalContext, {
                 kind: 'claimReport',
                 title: 'Claim Re-verification',
                 detail: `${report.summary.flagged ?? 0} claim${(report.summary.flagged ?? 0) === 1 ? '' : 's'} flagged.`,

@@ -769,6 +769,45 @@ test('registerAuditorJobs: registers all four job executors', () => {
     }
 });
 
+test('registerAuditorJobs: all report executors pass the live queue context to approval', async () => {
+    const registered = new Map();
+    const approvalContexts = [];
+    const api = {
+        registerStmbJobExecutor: (type, fn) => registered.set(type, fn),
+        awaitStmbJobApproval: async (context) => {
+            approvalContexts.push(context);
+            return { decision: 'accept' };
+        },
+    };
+    const popup = async () => ({ decision: 'accept' });
+    registerAuditorJobs(api, {
+        showCoverageReportPopup: popup,
+        showRegenerationDiffPopup: popup,
+        showTechnicalPassPopup: popup,
+        showClaimReverificationPopup: popup,
+    });
+
+    const liveContext = {
+        job: { id: 'live-audit-job' },
+        isCancelled: () => false,
+        setState: () => {},
+        patch: () => {},
+    };
+    const lorebookData = { entries: {} };
+    const inputs = {
+        'stmbc-audit-coverage': { lorebookData, notes: { items: [] } },
+        'stmbc-audit-regenerate': { lorebookData, chatSlice: [] },
+        'stmbc-audit-technical': { lorebookData, chatSlice: [] },
+        'stmbc-audit-claims': { lorebookData, chatSlice: [] },
+    };
+
+    for (const [type, input] of Object.entries(inputs)) {
+        const result = await registered.get(type)({ id: 'data-only-job', input }, liveContext);
+        assert.equal(result.decision, 'accept');
+    }
+    assert.deepEqual(approvalContexts, [liveContext, liveContext, liveContext, liveContext]);
+});
+
 test('registerAuditorJobs: coverage executor returns a coverage report', async () => {
     const registered = new Map();
     const api = { registerStmbJobExecutor: (type, fn) => registered.set(type, fn) };
