@@ -248,6 +248,7 @@ export function renderClaimReverificationHTML(report) {
     const confirmed = Number.isFinite(Number(summary.confirmed)) ? Number(summary.confirmed) : 0;
     const flagged = Number.isFinite(Number(summary.flagged)) ? Number(summary.flagged) : 0;
     const unknown = Number.isFinite(Number(summary.unknown)) ? Number(summary.unknown) : 0;
+    const noProvenance = Number.isFinite(Number(summary.noProvenance)) ? Number(summary.noProvenance) : 0;
 
     const cards = verdicts.filter((v) => v?.verdict !== 'confirmed').map((v) => {
         const title = String(v?.title ?? `Entry ${v?.uid ?? ''}`);
@@ -272,7 +273,9 @@ export function renderClaimReverificationHTML(report) {
     return `
         <h3>Claim Re-verification</h3>
         <div class="opacity70p marginBot10">
-            ${escapeHtml(`${confirmed} confirmed, ${flagged} flagged, ${unknown} unknown across ${verdicts.length} range${verdicts.length === 1 ? '' : 's'}.`)}
+            ${escapeHtml(`${confirmed} confirmed, ${flagged} flagged, ${unknown} unknown across ${verdicts.length} range${verdicts.length === 1 ? '' : 's'}`
+                + (noProvenance ? ` · ${noProvenance} entr${noProvenance === 1 ? 'y' : 'ies'} with no provenance, cannot verify` : '')
+                + '.')}
         </div>
         ${cards.length === 0
             ? `<div class="opacity70p"><em>No claims flagged. All re-verified ranges confirmed.</em></div>`

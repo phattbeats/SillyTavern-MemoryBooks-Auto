@@ -22,6 +22,7 @@
 
 import { formatAuditMessage } from './auditorCore.js';
 import { WORLD_INFO_PRIMER } from './worldInfoPrimer.js';
+import { ERROR_CONTROL_RULES } from './injectionCore.js';
 
 // ---------------------------------------------------------------- defaults
 
@@ -74,6 +75,18 @@ export const INSERTION_POSITION = Object.freeze({
  * `position` is structurally impossible rather than something to validate.
  *
  * {{TRANSCRIPT}} {{EXISTING}} {{MAX_ENTRIES}} are filled by buildOneShotPrompt.
+ *
+ * Carries the same `ERROR_CONTROL_RULES` block as the chunked/injection path
+ * (PHA-2722): before this, one-shot was the only generation prompt missing
+ * the never-invent-facts / flag-ambiguity / report-contradictions / attach-
+ * provenance rule set, backwards given it's the path that reads the whole
+ * story at once and is therefore best placed to cite accurately. Sharing the
+ * literal constant (rather than a hand-copied rule set) also means
+ * `extractProvenanceRanges` — the existing `src: msgs X–Y` consumer used by
+ * `runClaimReverification` — picks up one-shot entries with zero new code:
+ * one-shot becomes just another writer of the one provenance format instead
+ * of a second, unread one (`stmbAutoConfidence` stays as the entry-level
+ * ranking signal, see attributeSources below).
  */
 export const ONE_SHOT_PROMPT =
 `${WORLD_INFO_PRIMER}
@@ -97,6 +110,8 @@ RULES
    entries, listed below. Treat those as taken.
 5. Do not write entries about the user's own persona's private thoughts, and do
    not summarize the plot beat by beat — that is what memory entries are for.
+
+${ERROR_CONTROL_RULES}
 
 Reply with ONLY a JSON object of exactly this shape — no prose, no code fences:
 {"entries":[{"name":"","keys":[],"content":"","caseSensitive":false,"cascade":false,"throttle":100}]}
@@ -574,16 +589,23 @@ export function wasHumanEdited(existingEntry) {
  * Crude on purpose: no LLM call, no embeddings, just enough signal to tell
  * "the text said this" from "the model connected two things itself".
  *
- * Provenance is PER-FACT (`facts`, one entry per sentence), not per-entry
- * (PHA-2681 review finding 2): an entry-level majority vote averages away
- * exactly the case that motivated this issue — one inferred sentence sitting
- * inside an otherwise well-sourced entry. The rolled-up `confidence` is
- * `'inferred'` if ANY fact is inferred, not a >=50% threshold, so that one bad
- * sentence still flips the whole entry's flag rather than disappearing into an
- * average. `sourceRef` is the full sorted list of message ids any fact drew on
- * (finding 3) — a collapsed `first-last` span silently drops every id between
- * the endpoints, which is most of the story on a wide-ranging entry and cannot
- * drive a targeted re-read of just the messages that matter.
+ * Provenance is computed PER-FACT (`facts`, one entry per sentence), not
+ * per-entry (PHA-2681 review finding 2): an entry-level majority vote averages
+ * away exactly the case that motivated this issue — one inferred sentence
+ * sitting inside an otherwise well-sourced entry. The rolled-up `confidence`
+ * is `'inferred'` if ANY fact is inferred, not a >=50% threshold, so that one
+ * bad sentence still flips the whole entry's flag rather than disappearing
+ * into an average.
+ *
+ * `sourceRef`/`facts` are returned for the caller's own use but are NOT what
+ * ships on the entry (PHA-2722): the real, re-readable provenance is the
+ * `src: msgs X–Y` lines the model itself now writes into `content` (the same
+ * format every other writer uses, consumed by
+ * `extractProvenanceRanges`/`runClaimReverification`). Keeping a second,
+ * differently-shaped provenance record as an entry property duplicated that
+ * system without ever feeding it — only `confidence` survives onto the entry
+ * as `stmbAutoConfidence`, the ranking signal claim re-verification uses to
+ * decide which entries to recheck first.
  *
  * @param {string} content
  * @param {Array<{id?:number, index?:number, text?:string, mes?:string}>} messages
@@ -629,31 +651,6 @@ export function attributeSources(content, messages) {
     const confidence = facts.length && facts.every(f => f.confidence === 'stated') ? 'stated' : 'inferred';
     const sourceRef = Array.from(new Set(facts.flatMap(f => f.sourceRef))).sort((a, b) => a - b);
     return { confidence, sourceRef, facts };
-}
-
-/**
- * Does this existing entry still carry the pre-follow-up provenance shape
- * (`stmbAutoSourceRef` as a collapsed `"first-last"` span string rather than
- * the full id array)? Used to upgrade entries written between the PHA-2681
- * merge and this fix, so old-shape entries don't linger on disk indefinitely.
- */
-export function needsProvenanceMigration(entry) {
-    return !!entry && typeof entry.stmbAutoSourceRef === 'string' && entry.stmbAutoSourceRef !== '';
-}
-
-/**
- * Upgrade an old-shape entry's provenance fields in place — entry properties
- * only, content untouched. The span string only ever recorded its two
- * endpoints, so anything between them was already lost before this fix;
- * migration recovers what's recoverable rather than pretending otherwise.
- * @returns {{stmbAutoSourceRef:number[]}|null} the patch to apply, or null if
- *          this entry is already on the current shape
- */
-export function migrateProvenanceShape(entry) {
-    if (!needsProvenanceMigration(entry)) return null;
-    const parts = String(entry.stmbAutoSourceRef).split('-').map(Number).filter(Number.isFinite);
-    const sourceRef = Array.from(new Set(parts)).sort((a, b) => a - b);
-    return { stmbAutoSourceRef: sourceRef };
 }
 
 /**

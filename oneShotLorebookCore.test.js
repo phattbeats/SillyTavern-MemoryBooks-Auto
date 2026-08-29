@@ -24,8 +24,6 @@ import {
     formatTranscript,
     generateOneShotEntries,
     hashContent,
-    migrateProvenanceShape,
-    needsProvenanceMigration,
     normalizeKeyword,
     parseOneShotEntries,
     salvageEntryObjects,
@@ -78,6 +76,18 @@ test('the prompt leads with the World Info primer and the six-field output shape
         assert.ok(!ONE_SHOT_PROMPT.includes(stField), `ST-internal field "${stField}" must not be asked of the model`);
     }
     assert.match(ONE_SHOT_PROMPT, /no preventRecursion/);
+});
+
+test('PHA-2722: the prompt carries the shared ERROR-CONTROL rules, including the src: msgs provenance rule', () => {
+    // Before this, one-shot was the only generation path with none of the
+    // never-invent-facts / flag-ambiguity / report-contradictions rules, and
+    // its entries carried no `src: msgs` citations for runClaimReverification
+    // to find. Asserting against the literal shared block (not a hand-copied
+    // string) means this can never drift from the chunked/injection path again.
+    assert.match(ONE_SHOT_PROMPT, /ERROR-CONTROL RULES/);
+    assert.match(ONE_SHOT_PROMPT, /src: msgs X.Y/);
+    assert.match(ONE_SHOT_PROMPT, /Never invent unstated facts/);
+    assert.match(ONE_SHOT_PROMPT, /Report contradictions/);
 });
 
 test('buildOneShotPrompt fills every token and marks an empty book', () => {
@@ -471,17 +481,6 @@ test('attributeSources: reads the real extractAuditMessages shape (rawText), not
     const result = attributeSources('The bridge collapsed last spring.', messages);
     assert.equal(result.confidence, 'stated');
     assert.deepEqual(result.sourceRef, [5]);
-});
-
-test('needsProvenanceMigration / migrateProvenanceShape: upgrade the old collapsed-span shape', () => {
-    assert.equal(needsProvenanceMigration({ stmbAutoSourceRef: [3, 40] }), false);
-    assert.equal(needsProvenanceMigration({ stmbAutoSourceRef: '' }), false);
-    assert.equal(needsProvenanceMigration({}), false);
-    assert.equal(needsProvenanceMigration({ stmbAutoSourceRef: '3-200' }), true);
-
-    assert.equal(migrateProvenanceShape({ stmbAutoSourceRef: [3, 40] }), null);
-    assert.deepEqual(migrateProvenanceShape({ stmbAutoSourceRef: '3-200' }), { stmbAutoSourceRef: [3, 200] });
-    assert.deepEqual(migrateProvenanceShape({ stmbAutoSourceRef: '5' }), { stmbAutoSourceRef: [5] });
 });
 
 test('applyProvenancePinning: unchanged source is skipped, not rewritten', () => {
