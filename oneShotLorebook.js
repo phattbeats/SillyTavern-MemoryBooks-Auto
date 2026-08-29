@@ -26,6 +26,8 @@ import {
 import {
     ONE_SHOT_DEFAULTS,
     ONE_SHOT_PROMPT,
+    applyProvenancePinning,
+    attributeSources,
     buildOneShotPrompt,
     collectClaimedKeywords,
     dropMemoryTitleCollisions,
@@ -33,6 +35,7 @@ import {
     formatExistingEntries,
     formatTranscript,
     generateOneShotEntries,
+    hashContent,
     summarizeOneShot,
 } from './oneShotLorebookCore.js';
 
@@ -181,16 +184,25 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
 
     const { entries, collisions } = enforceGlobalKeywordUniqueness(guarded.entries, claimedByExisting);
 
+    // PHA-2681: a hand-edited entry is pinned and skipped rather than
+    // re-derived from the same ambiguous source; an entry whose freshly
+    // generated content matches what's already there is skipped too, so a
+    // re-run on unchanged material writes nothing and the entry stays
+    // byte-identical rather than getting re-worded for no reason.
+    const pinning = applyProvenancePinning(entries, existing);
+
     let created = 0;
     let updated = 0;
     let keywordless = 0;
     const failures = [];
+    const toWrite = pinning.toWrite;
 
-    for (let i = 0; i < entries.length; i++) {
-        const entry = entries[i];
+    for (let i = 0; i < toWrite.length; i++) {
+        const entry = toWrite[i];
         if (entry.keywordless) keywordless++;
+        const { confidence, sourceRef } = attributeSources(entry.content, plan.messages);
         try {
-            onProgress?.(`Writing “${entry.title}” (${i + 1}/${entries.length})…`);
+            onProgress?.(`Writing “${entry.title}” (${i + 1}/${toWrite.length})…`);
             const res = await upsertLorebookEntryByTitle(
                 lorebook.name,
                 lorebook.data,
@@ -215,9 +227,15 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
                         vectorized: true,
                         selective: entry.keysecondary.length > 0,
                         disable: false,
+                        // Provenance (PHA-2681): entry properties, zero prompt
+                        // tokens — travels with the file, can't desync.
+                        stmbAutoContentHash: hashContent(entry.content),
+                        stmbAutoConfidence: confidence,
+                        stmbAutoSourceRef: sourceRef,
+                        stmbAutoVerifiedByHuman: false,
                     },
                     // Only the last write needs to refresh the editor.
-                    refreshEditor: i === entries.length - 1,
+                    refreshEditor: i === toWrite.length - 1,
                 },
             );
             if (res.created) created++;
@@ -228,8 +246,40 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
         }
     }
 
-    let message = summarizeOneShot({ created, updated, dropped: parsed.dropped + guarded.skipped.length, collisions, keywordless });
+    // Latch the pin: the first run to notice a human edited an entry stamps
+    // stmbAutoVerifiedByHuman so it stays pinned even once the hash mismatch
+    // that revealed it is gone (the human's content IS the new baseline).
+    if (pinning.newlyPinned.length) {
+        for (const { title } of pinning.newlyPinned) {
+            const prior = existing.find(e => String(e?.title ?? '').trim().toLowerCase() === title.trim().toLowerCase());
+            if (!prior) continue;
+            try {
+                await upsertLorebookEntryByTitle(lorebook.name, lorebook.data, title, prior.content, {
+                    entryOverrides: {
+                        stmbAutoVerifiedByHuman: true,
+                        stmbAutoContentHash: hashContent(prior.content),
+                    },
+                    refreshEditor: false,
+                });
+            } catch (e) {
+                console.warn(`${LOG}: could not pin human edit on “${title}”`, e);
+            }
+        }
+    }
+
+    let message = summarizeOneShot({
+        created, updated, dropped: parsed.dropped + guarded.skipped.length, collisions, keywordless,
+        skipped: pinning.skipped, contradictions: pinning.contradictions,
+    });
+    if (pinning.contradictions.length) {
+        console.warn(`${LOG}: ${pinning.contradictions.length} human-verified entr${pinning.contradictions.length === 1 ? 'y' : 'ies'} contradicted by new source, kept as-is:`,
+            pinning.contradictions.map(c => c.title));
+    }
     if (failures.length) message += ` · ${failures.length} write failure${failures.length === 1 ? '' : 's'}: ${failures.slice(0, 3).join('; ')}`;
 
-    return { ok: created + updated > 0, message, created, updated, collisions, entries };
+    return {
+        ok: created + updated > 0 || pinning.skipped.length > 0,
+        message, created, updated, collisions, entries,
+        skipped: pinning.skipped, contradictions: pinning.contradictions,
+    };
 }

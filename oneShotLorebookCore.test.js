@@ -12,6 +12,8 @@ import {
     ONE_SHOT_DEFAULTS,
     ONE_SHOT_PROMPT,
     SELECTIVE_LOGIC,
+    applyProvenancePinning,
+    attributeSources,
     buildOneShotPrompt,
     collectClaimedKeywords,
     containsWholeWord,
@@ -21,10 +23,12 @@ import {
     formatExistingEntries,
     formatTranscript,
     generateOneShotEntries,
+    hashContent,
     normalizeKeyword,
     parseOneShotEntries,
     salvageEntryObjects,
     summarizeOneShot,
+    wasHumanEdited,
 } from './oneShotLorebookCore.js';
 
 // The internal, already-parsed entry shape — used directly against the
@@ -389,4 +393,74 @@ test('ACCEPTANCE: one run produces zero cross-entry keyword collisions, post-hoc
     assert.ok(!byTitle['The Citadel'].includes('Ada'), 'the existing "Ada" entry keeps its keyword');
     assert.equal(normalizeKeyword('  Elder   Maxson '), 'elder maxson');
     assert.equal(ONE_SHOT_DEFAULTS.truncate, 0, 'the one-shot path reads full messages');
+});
+
+// ---------------------------------------------------------------- PHA-2681: provenance + pinning
+
+test('hashContent is stable across whitespace but changes with content', () => {
+    assert.equal(hashContent('Ada is a synth.'), hashContent('  Ada is a synth.  '));
+    assert.notEqual(hashContent('Ada is a synth.'), hashContent('Ada is human.'));
+});
+
+test('wasHumanEdited: no hash on the entry means never seen this tool, not edited', () => {
+    assert.equal(wasHumanEdited(null), false);
+    assert.equal(wasHumanEdited({ content: 'x' }), false);
+});
+
+test('wasHumanEdited: mismatch between stored hash and current content means a human touched it', () => {
+    const written = { content: 'Ada is a synth.', stmbAutoContentHash: hashContent('Ada is a synth.') };
+    assert.equal(wasHumanEdited(written), false);
+    const edited = { content: 'Ada is actually human.', stmbAutoContentHash: hashContent('Ada is a synth.') };
+    assert.equal(wasHumanEdited(edited), true);
+});
+
+test('attributeSources: near-verbatim content is stated, novel phrasing is inferred', () => {
+    const messages = [
+        { id: 5, text: 'Marcus told Elena that the bridge collapsed last spring.' },
+        { id: 9, text: 'She never told anyone she still loved him.' },
+    ];
+    const stated = attributeSources('The bridge collapsed last spring.', messages);
+    assert.equal(stated.confidence, 'stated');
+    assert.equal(stated.sourceRef, '5');
+
+    const inferred = attributeSources('Marcus and Elena are secretly plotting a coup against the council.', messages);
+    assert.equal(inferred.confidence, 'inferred');
+});
+
+test('applyProvenancePinning: unchanged source is skipped, not rewritten', () => {
+    const existing = [{ title: 'Ada', content: 'Ada is a synth.', stmbAutoContentHash: hashContent('Ada is a synth.') }];
+    const generated = [{ title: 'Ada', content: 'Ada is a synth.' }];
+    const { toWrite, skipped } = applyProvenancePinning(generated, existing);
+    assert.deepEqual(toWrite, []);
+    assert.equal(skipped.length, 1);
+    assert.equal(skipped[0].reason, 'source unchanged');
+});
+
+test('applyProvenancePinning: a human-edited entry is pinned and a contradiction is reported, not overwritten', () => {
+    // The tool wrote "Ada is a synth." last run (hash matches). A human then
+    // corrected it by hand to "Ada is human." — the hash on disk is now stale,
+    // which IS the edit signal.
+    const existing = [{ title: 'Ada', content: 'Ada is human.', stmbAutoContentHash: hashContent('Ada is a synth.') }];
+    const generated = [{ title: 'Ada', content: 'Ada is a synth, revealed in chapter 4.' }];
+
+    const { toWrite, skipped, contradictions, newlyPinned } = applyProvenancePinning(generated, existing);
+    assert.deepEqual(toWrite, []);
+    assert.equal(skipped[0].reason, 'human-verified, source contradiction reported');
+    assert.equal(contradictions.length, 1);
+    assert.equal(contradictions[0].existing, 'Ada is human.');
+    assert.equal(contradictions[0].proposed, 'Ada is a synth, revealed in chapter 4.');
+    assert.deepEqual(newlyPinned, [{ title: 'Ada' }]);
+});
+
+test('applyProvenancePinning: a previously-pinned entry stays pinned even once the hash lines up', () => {
+    const existing = [{ title: 'Ada', content: 'Ada is human.', stmbAutoVerifiedByHuman: true, stmbAutoContentHash: hashContent('Ada is human.') }];
+    const generated = [{ title: 'Ada', content: 'Ada is actually a synth.' }];
+    const { toWrite, contradictions } = applyProvenancePinning(generated, existing);
+    assert.deepEqual(toWrite, []);
+    assert.equal(contradictions.length, 1);
+});
+
+test('applyProvenancePinning: a brand new entry with no prior always writes', () => {
+    const { toWrite } = applyProvenancePinning([{ title: 'New Guy', content: 'Some new content.' }], []);
+    assert.equal(toWrite.length, 1);
 });
