@@ -599,7 +599,13 @@ export function attributeSources(content, messages) {
     const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
     const wordsOf = (s) => new Set(norm(s).split(' ').filter(w => w.length > 3));
 
-    const msgWords = list.map(m => ({ id: m?.id ?? m?.index, words: wordsOf(m?.text ?? m?.mes ?? '') }));
+    // extractAuditMessages (the real runtime source of plan.messages) emits
+    // `rawText`, not `text`/`mes` — read it first. Without this every message
+    // silently scores as empty text, matching nothing, so EVERY entry
+    // regardless of its actual content was stamped confidence:'inferred' in
+    // production (caught during the Magisa provenance spot-check, PHA-2681
+    // follow-up review).
+    const msgWords = list.map(m => ({ id: m?.id ?? m?.index, words: wordsOf(m?.rawText ?? m?.text ?? m?.mes ?? '') }));
 
     const facts = [];
     for (const sentence of sentences) {

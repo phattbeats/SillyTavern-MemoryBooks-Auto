@@ -462,6 +462,17 @@ test('attributeSources: per-fact, not per-entry — one inferred sentence flips 
     assert.deepEqual(result.sourceRef, [3, 40]);
 });
 
+test('attributeSources: reads the real extractAuditMessages shape (rawText), not just test fixtures\' text/mes', () => {
+    // extractAuditMessages (auditorCore.js) emits {id, speaker, rawText} — the
+    // ACTUAL shape plan.messages carries at runtime. A prior bug read only
+    // .text/.mes, so every real message scored as empty text and every entry
+    // came back 'inferred' regardless of content.
+    const messages = [{ id: 5, speaker: 'Narrator', rawText: 'The bridge collapsed last spring.' }];
+    const result = attributeSources('The bridge collapsed last spring.', messages);
+    assert.equal(result.confidence, 'stated');
+    assert.deepEqual(result.sourceRef, [5]);
+});
+
 test('needsProvenanceMigration / migrateProvenanceShape: upgrade the old collapsed-span shape', () => {
     assert.equal(needsProvenanceMigration({ stmbAutoSourceRef: [3, 40] }), false);
     assert.equal(needsProvenanceMigration({ stmbAutoSourceRef: '' }), false);
