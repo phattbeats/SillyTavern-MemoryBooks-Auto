@@ -570,14 +570,25 @@ export function wasHumanEdited(existingEntry) {
  * ZERO prompt tokens: this runs post-hoc over the model's finished reply, not
  * as an extra thing the model is asked to emit. A sentence with strong word
  * overlap against some message is `stated`; a sentence the story never said in
- * those words is `inferred` — the model concluded it rather than read it, and
- * per the write-time rule that is the first thing reconciliation re-checks.
+ * those words is `inferred` — the model concluded it rather than read it.
  * Crude on purpose: no LLM call, no embeddings, just enough signal to tell
  * "the text said this" from "the model connected two things itself".
  *
+ * Provenance is PER-FACT (`facts`, one entry per sentence), not per-entry
+ * (PHA-2681 review finding 2): an entry-level majority vote averages away
+ * exactly the case that motivated this issue — one inferred sentence sitting
+ * inside an otherwise well-sourced entry. The rolled-up `confidence` is
+ * `'inferred'` if ANY fact is inferred, not a >=50% threshold, so that one bad
+ * sentence still flips the whole entry's flag rather than disappearing into an
+ * average. `sourceRef` is the full sorted list of message ids any fact drew on
+ * (finding 3) — a collapsed `first-last` span silently drops every id between
+ * the endpoints, which is most of the story on a wide-ranging entry and cannot
+ * drive a targeted re-read of just the messages that matter.
+ *
  * @param {string} content
  * @param {Array<{id?:number, index?:number, text?:string, mes?:string}>} messages
- * @returns {{confidence:'stated'|'inferred', sourceRef:string}}
+ * @returns {{confidence:'stated'|'inferred', sourceRef:number[],
+ *            facts:Array<{text:string, confidence:'stated'|'inferred', sourceRef:number[]}>}}
  */
 export function attributeSources(content, messages) {
     const sentences = String(content ?? '')
@@ -590,11 +601,10 @@ export function attributeSources(content, messages) {
 
     const msgWords = list.map(m => ({ id: m?.id ?? m?.index, words: wordsOf(m?.text ?? m?.mes ?? '') }));
 
-    let statedHits = 0;
-    const ids = [];
+    const facts = [];
     for (const sentence of sentences) {
         const sw = wordsOf(sentence);
-        if (sw.size < 3) continue;
+        if (sw.size < 3) continue;   // too short to score meaningfully — not a fact
         let best = null;
         for (const m of msgWords) {
             if (!m.words.size || m.id == null) continue;
@@ -603,14 +613,41 @@ export function attributeSources(content, messages) {
             const ratio = overlap / sw.size;
             if (ratio >= 0.6 && (!best || ratio > best.ratio)) best = { ratio, id: m.id };
         }
-        if (best) { statedHits++; ids.push(best.id); }
+        facts.push({
+            text: sentence,
+            confidence: best ? 'stated' : 'inferred',
+            sourceRef: best ? [best.id] : [],
+        });
     }
 
-    const scored = sentences.filter(s => wordsOf(s).size >= 3).length;
-    const confidence = scored && statedHits / scored >= 0.5 ? 'stated' : 'inferred';
-    const uniq = Array.from(new Set(ids)).sort((a, b) => a - b);
-    const sourceRef = uniq.length === 0 ? '' : uniq.length === 1 ? `${uniq[0]}` : `${uniq[0]}-${uniq[uniq.length - 1]}`;
-    return { confidence, sourceRef };
+    const confidence = facts.length && facts.every(f => f.confidence === 'stated') ? 'stated' : 'inferred';
+    const sourceRef = Array.from(new Set(facts.flatMap(f => f.sourceRef))).sort((a, b) => a - b);
+    return { confidence, sourceRef, facts };
+}
+
+/**
+ * Does this existing entry still carry the pre-follow-up provenance shape
+ * (`stmbAutoSourceRef` as a collapsed `"first-last"` span string rather than
+ * the full id array)? Used to upgrade entries written between the PHA-2681
+ * merge and this fix, so old-shape entries don't linger on disk indefinitely.
+ */
+export function needsProvenanceMigration(entry) {
+    return !!entry && typeof entry.stmbAutoSourceRef === 'string' && entry.stmbAutoSourceRef !== '';
+}
+
+/**
+ * Upgrade an old-shape entry's provenance fields in place — entry properties
+ * only, content untouched. The span string only ever recorded its two
+ * endpoints, so anything between them was already lost before this fix;
+ * migration recovers what's recoverable rather than pretending otherwise.
+ * @returns {{stmbAutoSourceRef:number[]}|null} the patch to apply, or null if
+ *          this entry is already on the current shape
+ */
+export function migrateProvenanceShape(entry) {
+    if (!needsProvenanceMigration(entry)) return null;
+    const parts = String(entry.stmbAutoSourceRef).split('-').map(Number).filter(Number.isFinite);
+    const sourceRef = Array.from(new Set(parts)).sort((a, b) => a - b);
+    return { stmbAutoSourceRef: sourceRef };
 }
 
 /**
@@ -618,20 +655,37 @@ export function attributeSources(content, messages) {
  *
  * A hand-corrected entry must survive a later re-run untouched, and a genuine
  * source contradiction against it must be REPORTED, never silently
- * reconciled (PHA-1878 decision 7). Two other outcomes fall out of the same
- * check for free:
- *   - an entry this tool wrote last time, whose freshly generated content
- *     hashes the same, is skipped rather than rewritten byte-for-byte
- *     (the "an entry whose source did not change comes back byte-identical"
- *     acceptance criterion — and it costs zero write calls, not zero tokens);
- *   - an entry a human touched, whose freshly generated content ALSO hashes
- *     the same as what the human left, is likewise left alone.
+ * reconciled (PHA-1878 decision 7).
+ *
+ * This does NOT by itself satisfy "an entry whose source did not change comes
+ * back byte-identical": the hash comparison below is against the model's
+ * FRESHLY GENERATED content, which reproduces byte-identical prose only in
+ * the rare case where the model happens to regenerate the exact same text —
+ * in practice essentially never. On unchanged source the fresh content
+ * differs from the stored hash, so the entry still falls through to
+ * `toWrite` and gets rewritten. That acceptance criterion needs Build item 5
+ * (regenerate only entities whose source actually changed, never re-deriving
+ * an untouched one at all) — tracked as a pulled-back acceptance criterion on
+ * this issue, built in PHA-2693. What this function DOES guarantee: a
+ * human-verified entry is never silently overwritten, and a fresh call that
+ * happens to reproduce a prior write byte-for-byte costs zero write calls.
+ *
+ * Title-keyed matching alone loses a pin when the model renames an entry it
+ * should have updated in place (review finding 5 — e.g. "Button" ->
+ * "Button Firewood"): no exact title match is found, the pin-bearing prior
+ * is invisible, and the human correction would either be silently dropped or
+ * duplicated under the new title. Bounded fix: fall back to a whole-word
+ * title match, but ONLY against a prior a human has actually verified — that
+ * narrows the false-positive surface to the one case this feature exists to
+ * protect. A rename of an ordinary (non-pinned) entry still isn't tracked;
+ * that's a real but lower-severity gap (harmless-ish duplication under the
+ * new title) left out of scope here.
  *
  * @param {Array<object>} generated  parsed+deduped one-shot entries (`title`, `content`, ...)
  * @param {Array<object>} existing   entriesForCoverage() output for the bound book
  * @returns {{toWrite:Array<object>, skipped:Array<{title:string, reason:string}>,
- *            contradictions:Array<{title:string, existing:string, proposed:string}>,
- *            newlyPinned:Array<{title:string}>}}
+ *            contradictions:Array<{title:string, existing:string, proposed:string, renamedFrom?:string}>,
+ *            newlyPinned:Array<{title:string}>, renamed:Array<{uid:*, from:string, to:string}>}}
  */
 export function applyProvenancePinning(generated, existing) {
     const byTitle = new Map();
@@ -640,15 +694,42 @@ export function applyProvenancePinning(generated, existing) {
         if (t) byTitle.set(t, e);
     }
 
+    // Exact matches are claimed up front so the rename fallback below can
+    // never steal a prior that some OTHER generated entry is legitimately
+    // updating under its own unchanged title.
+    const claimedPriors = new Set();
+    for (const entry of (Array.isArray(generated) ? generated : [])) {
+        const key = String(entry?.title ?? '').trim().toLowerCase();
+        if (byTitle.has(key)) claimedPriors.add(key);
+    }
+
     const toWrite = [];
     const skipped = [];
     const contradictions = [];
     const newlyPinned = [];
+    const renamed = [];
 
     for (const entry of (Array.isArray(generated) ? generated : [])) {
         const key = String(entry?.title ?? '').trim().toLowerCase();
-        const prior = byTitle.get(key);
+        let prior = byTitle.get(key);
+        let priorKey = key;
+        let isRename = false;
+
+        if (!prior) {
+            for (const [existingKey, cand] of byTitle) {
+                if (claimedPriors.has(existingKey)) continue;
+                if (cand?.stmbAutoVerifiedByHuman !== true) continue;
+                if (containsWholeWord(key, existingKey) || containsWholeWord(existingKey, key)) {
+                    prior = cand;
+                    priorKey = existingKey;
+                    isRename = true;
+                    break;
+                }
+            }
+        }
+
         if (!prior) { toWrite.push(entry); continue; }
+        claimedPriors.add(priorKey);
 
         const editedNow = wasHumanEdited(prior);
         const humanVerified = prior.stmbAutoVerifiedByHuman === true || editedNow;
@@ -657,8 +738,15 @@ export function applyProvenancePinning(generated, existing) {
         const sameAsPrior = hashContent(entry.content) === hashContent(prior.content);
 
         if (humanVerified) {
-            if (sameAsPrior) { skipped.push({ title: entry.title, reason: 'human-verified, unchanged' }); continue; }
-            contradictions.push({ title: entry.title, existing: prior.content, proposed: entry.content });
+            if (sameAsPrior) {
+                skipped.push({ title: entry.title, reason: isRename ? 'human-verified, unchanged (rename ignored)' : 'human-verified, unchanged' });
+                if (isRename) renamed.push({ uid: prior.uid, from: prior.title, to: entry.title });
+                continue;
+            }
+            contradictions.push({
+                title: entry.title, existing: prior.content, proposed: entry.content,
+                ...(isRename ? { renamedFrom: prior.title } : {}),
+            });
             skipped.push({ title: entry.title, reason: 'human-verified, source contradiction reported' });
             continue;
         }
@@ -671,7 +759,7 @@ export function applyProvenancePinning(generated, existing) {
         toWrite.push(entry);
     }
 
-    return { toWrite, skipped, contradictions, newlyPinned };
+    return { toWrite, skipped, contradictions, newlyPinned, renamed };
 }
 
 // ---------------------------------------------------------------- the call
@@ -694,16 +782,26 @@ export async function generateOneShotEntries({ generate, prompt, cfg = {} }) {
 
 /**
  * Human-readable summary of a one-shot run, for the toast and the job detail.
+ *
+ * `inferred` and `renamed` are the first real CONSUMERS of the per-fact
+ * provenance stamped on each entry (review finding 4: written but never
+ * read). This is a surfaced signal for a human to act on, not automated
+ * reconciliation — the one-shot path is architecturally a single call with
+ * nothing downstream to reconcile against, so "reconciliation re-checks it"
+ * from the original issue text does not apply here the way it does on the
+ * chunked path's reconciliation pass.
  */
 export function summarizeOneShot({
     created = 0, updated = 0, dropped = 0, collisions = [], keywordless = 0,
-    skipped = [], contradictions = [],
+    skipped = [], contradictions = [], inferred = 0, renamed = [],
 } = {}) {
     const parts = [`one-shot lorebook: ${created} created, ${updated} updated`];
     if (skipped.length) parts.push(`${skipped.length} entr${skipped.length === 1 ? 'y' : 'ies'} unchanged, skipped`);
     if (contradictions.length) parts.push(`${contradictions.length} human-verified entr${contradictions.length === 1 ? 'y' : 'ies'} contradicted by new source (kept, reported)`);
+    if (renamed.length) parts.push(`${renamed.length} rename${renamed.length === 1 ? '' : 's'} of a pinned entry ignored (kept the human-verified title)`);
     if (dropped) parts.push(`${dropped} unusable entr${dropped === 1 ? 'y' : 'ies'} dropped`);
     if (collisions.length) parts.push(`${collisions.length} keyword collision${collisions.length === 1 ? '' : 's'} resolved`);
     if (keywordless) parts.push(`${keywordless} entr${keywordless === 1 ? 'y' : 'ies'} left without a free keyword`);
+    if (inferred) parts.push(`${inferred} entr${inferred === 1 ? 'y' : 'ies'} written with an unstated (inferred) claim — worth a source check`);
     return parts.join(' · ');
 }

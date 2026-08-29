@@ -36,6 +36,8 @@ import {
     formatTranscript,
     generateOneShotEntries,
     hashContent,
+    migrateProvenanceShape,
+    needsProvenanceMigration,
     summarizeOneShot,
 } from './oneShotLorebookCore.js';
 
@@ -143,6 +145,25 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
 
     const cfg = plan.cfg || {};
     const existing = entriesForCoverage(lorebook.data);
+
+    // One-time upgrade for entries written between the PHA-2681 merge and this
+    // fix: `stmbAutoSourceRef` moved from a collapsed "first-last" span string
+    // to the full id array (review finding 3). Content is untouched, so this
+    // cannot trip human-edit detection or pinning.
+    for (const e of existing) {
+        if (!needsProvenanceMigration(e)) continue;
+        const patch = migrateProvenanceShape(e);
+        try {
+            await upsertLorebookEntryByTitle(lorebook.name, lorebook.data, e.title, e.content, {
+                entryOverrides: patch,
+                refreshEditor: false,
+            });
+            Object.assign(e, patch);
+        } catch (err) {
+            console.warn(`${LOG}: could not migrate provenance shape on “${e.title}”`, err);
+        }
+    }
+
     const lorePool = existing.filter(e => !e.isMemory);
 
     const prompt = buildOneShotPrompt({
@@ -185,22 +206,30 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
     const { entries, collisions } = enforceGlobalKeywordUniqueness(guarded.entries, claimedByExisting);
 
     // PHA-2681: a hand-edited entry is pinned and skipped rather than
-    // re-derived from the same ambiguous source; an entry whose freshly
-    // generated content matches what's already there is skipped too, so a
-    // re-run on unchanged material writes nothing and the entry stays
-    // byte-identical rather than getting re-worded for no reason.
+    // re-derived from the same ambiguous source, and a genuine source
+    // contradiction against it is reported rather than silently applied. An
+    // entry whose FRESH regeneration happens to hash-match what's already on
+    // disk also costs zero write calls — but that is a byte-identical-by-luck
+    // case, not the "unchanged source stays unchanged" guarantee: this path
+    // still regenerates every entry from scratch, so it does NOT by itself
+    // stop ordinary re-wording drift on unchanged source (that needs Build
+    // item 5 — regenerate only entities whose source actually changed —
+    // tracked as a pulled-back acceptance criterion on PHA-2681, built in
+    // PHA-2693).
     const pinning = applyProvenancePinning(entries, existing);
 
     let created = 0;
     let updated = 0;
     let keywordless = 0;
+    let inferred = 0;
     const failures = [];
     const toWrite = pinning.toWrite;
 
     for (let i = 0; i < toWrite.length; i++) {
         const entry = toWrite[i];
         if (entry.keywordless) keywordless++;
-        const { confidence, sourceRef } = attributeSources(entry.content, plan.messages);
+        const { confidence, sourceRef, facts } = attributeSources(entry.content, plan.messages);
+        if (confidence === 'inferred') inferred++;
         try {
             onProgress?.(`Writing “${entry.title}” (${i + 1}/${toWrite.length})…`);
             const res = await upsertLorebookEntryByTitle(
@@ -229,9 +258,13 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
                         disable: false,
                         // Provenance (PHA-2681): entry properties, zero prompt
                         // tokens — travels with the file, can't desync.
+                        // `stmbAutoConfidence`/`stmbAutoSourceRef` are the
+                        // entry-level rollup; `stmbAutoFacts` carries the
+                        // per-sentence breakdown the issue actually asked for.
                         stmbAutoContentHash: hashContent(entry.content),
                         stmbAutoConfidence: confidence,
                         stmbAutoSourceRef: sourceRef,
+                        stmbAutoFacts: facts,
                         stmbAutoVerifiedByHuman: false,
                     },
                     // Only the last write needs to refresh the editor.
@@ -270,7 +303,12 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
     let message = summarizeOneShot({
         created, updated, dropped: parsed.dropped + guarded.skipped.length, collisions, keywordless,
         skipped: pinning.skipped, contradictions: pinning.contradictions,
+        inferred, renamed: pinning.renamed,
     });
+    if (pinning.renamed.length) {
+        console.warn(`${LOG}: ${pinning.renamed.length} rename${pinning.renamed.length === 1 ? '' : 's'} of a pinned entry ignored, kept the human-verified title:`,
+            pinning.renamed.map(r => `${r.from} -> ${r.to}`));
+    }
     if (pinning.contradictions.length) {
         console.warn(`${LOG}: ${pinning.contradictions.length} human-verified entr${pinning.contradictions.length === 1 ? 'y' : 'ies'} contradicted by new source, kept as-is:`,
             pinning.contradictions.map(c => c.title));

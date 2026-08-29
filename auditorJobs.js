@@ -162,6 +162,7 @@ export function entriesForCoverage(lorebookData) {
             stmbAutoVerifiedByHuman: entry.stmbAutoVerifiedByHuman === true,
             stmbAutoConfidence: entry.stmbAutoConfidence,
             stmbAutoSourceRef: entry.stmbAutoSourceRef,
+            stmbAutoFacts: entry.stmbAutoFacts,
         });
     }
     return out;
