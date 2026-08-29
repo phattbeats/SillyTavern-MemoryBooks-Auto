@@ -20,6 +20,10 @@ eval/reports/phase2/*
 !eval/reports/phase7/
 eval/reports/phase7/*
 !eval/reports/phase7/evidence.md
+# …and the PHA-2732 rewrite acceptance harness evidence, same deal.
+!eval/reports/rewriteAcceptance/
+eval/reports/rewriteAcceptance/*
+!eval/reports/rewriteAcceptance/evidence.md
 eval/predictions*.json
 eval/.env
 .env
