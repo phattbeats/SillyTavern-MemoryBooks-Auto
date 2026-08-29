@@ -156,6 +156,12 @@ export function entriesForCoverage(lorebookData) {
             constant: !!entry.constant,
             disable: entry.disable === true,
             isMemory: isMemoryEntry(entry),
+            // PHA-2681: provenance/pinning state must survive this projection —
+            // it's how re-runs detect a human edit and skip an unchanged entry.
+            stmbAutoContentHash: entry.stmbAutoContentHash,
+            stmbAutoVerifiedByHuman: entry.stmbAutoVerifiedByHuman === true,
+            stmbAutoConfidence: entry.stmbAutoConfidence,
+            stmbAutoSourceRef: entry.stmbAutoSourceRef,
         });
     }
     return out;

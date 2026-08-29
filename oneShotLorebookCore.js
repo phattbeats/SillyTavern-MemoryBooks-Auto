@@ -535,6 +535,145 @@ export function findKeywordCollisions(entries) {
     return out;
 }
 
+// ---------------------------------------------------------------- provenance (PHA-2681)
+
+/**
+ * Deterministic 32-bit content hash (FNV-1a), used only to notice that content
+ * changed — not for anything cryptographic. Whitespace-trimmed so re-saving
+ * the same book through SillyTavern's own JSON round-trip never reads as an edit.
+ */
+export function hashContent(text) {
+    const s = String(text ?? '').trim();
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * Human-edit detection with no sidecar and no edit signal from ST: this tool
+ * stamps `stmbAutoContentHash` on every entry it writes, so a mismatch at the
+ * start of the NEXT run means something changed the content since — and the
+ * only actor that can be, since this tool only ever writes through its own
+ * upsert path, is a human.
+ */
+export function wasHumanEdited(existingEntry) {
+    if (!existingEntry || typeof existingEntry !== 'object') return false;
+    if (!existingEntry.stmbAutoContentHash) return false;
+    return hashContent(existingEntry.content) !== existingEntry.stmbAutoContentHash;
+}
+
+/**
+ * Attribute an entry's content to the transcript messages it came from, at
+ * ZERO prompt tokens: this runs post-hoc over the model's finished reply, not
+ * as an extra thing the model is asked to emit. A sentence with strong word
+ * overlap against some message is `stated`; a sentence the story never said in
+ * those words is `inferred` — the model concluded it rather than read it, and
+ * per the write-time rule that is the first thing reconciliation re-checks.
+ * Crude on purpose: no LLM call, no embeddings, just enough signal to tell
+ * "the text said this" from "the model connected two things itself".
+ *
+ * @param {string} content
+ * @param {Array<{id?:number, index?:number, text?:string, mes?:string}>} messages
+ * @returns {{confidence:'stated'|'inferred', sourceRef:string}}
+ */
+export function attributeSources(content, messages) {
+    const sentences = String(content ?? '')
+        .split(/(?<=[.!?])\s+/)
+        .map(s => s.trim())
+        .filter(Boolean);
+    const list = Array.isArray(messages) ? messages : [];
+    const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    const wordsOf = (s) => new Set(norm(s).split(' ').filter(w => w.length > 3));
+
+    const msgWords = list.map(m => ({ id: m?.id ?? m?.index, words: wordsOf(m?.text ?? m?.mes ?? '') }));
+
+    let statedHits = 0;
+    const ids = [];
+    for (const sentence of sentences) {
+        const sw = wordsOf(sentence);
+        if (sw.size < 3) continue;
+        let best = null;
+        for (const m of msgWords) {
+            if (!m.words.size || m.id == null) continue;
+            let overlap = 0;
+            for (const w of sw) if (m.words.has(w)) overlap++;
+            const ratio = overlap / sw.size;
+            if (ratio >= 0.6 && (!best || ratio > best.ratio)) best = { ratio, id: m.id };
+        }
+        if (best) { statedHits++; ids.push(best.id); }
+    }
+
+    const scored = sentences.filter(s => wordsOf(s).size >= 3).length;
+    const confidence = scored && statedHits / scored >= 0.5 ? 'stated' : 'inferred';
+    const uniq = Array.from(new Set(ids)).sort((a, b) => a - b);
+    const sourceRef = uniq.length === 0 ? '' : uniq.length === 1 ? `${uniq[0]}` : `${uniq[0]}-${uniq[uniq.length - 1]}`;
+    return { confidence, sourceRef };
+}
+
+/**
+ * Human-edit pinning (PHA-2681, the load-bearing mechanism of this issue).
+ *
+ * A hand-corrected entry must survive a later re-run untouched, and a genuine
+ * source contradiction against it must be REPORTED, never silently
+ * reconciled (PHA-1878 decision 7). Two other outcomes fall out of the same
+ * check for free:
+ *   - an entry this tool wrote last time, whose freshly generated content
+ *     hashes the same, is skipped rather than rewritten byte-for-byte
+ *     (the "an entry whose source did not change comes back byte-identical"
+ *     acceptance criterion — and it costs zero write calls, not zero tokens);
+ *   - an entry a human touched, whose freshly generated content ALSO hashes
+ *     the same as what the human left, is likewise left alone.
+ *
+ * @param {Array<object>} generated  parsed+deduped one-shot entries (`title`, `content`, ...)
+ * @param {Array<object>} existing   entriesForCoverage() output for the bound book
+ * @returns {{toWrite:Array<object>, skipped:Array<{title:string, reason:string}>,
+ *            contradictions:Array<{title:string, existing:string, proposed:string}>,
+ *            newlyPinned:Array<{title:string}>}}
+ */
+export function applyProvenancePinning(generated, existing) {
+    const byTitle = new Map();
+    for (const e of (Array.isArray(existing) ? existing : [])) {
+        const t = String(e?.title ?? '').trim().toLowerCase();
+        if (t) byTitle.set(t, e);
+    }
+
+    const toWrite = [];
+    const skipped = [];
+    const contradictions = [];
+    const newlyPinned = [];
+
+    for (const entry of (Array.isArray(generated) ? generated : [])) {
+        const key = String(entry?.title ?? '').trim().toLowerCase();
+        const prior = byTitle.get(key);
+        if (!prior) { toWrite.push(entry); continue; }
+
+        const editedNow = wasHumanEdited(prior);
+        const humanVerified = prior.stmbAutoVerifiedByHuman === true || editedNow;
+        if (editedNow && prior.stmbAutoVerifiedByHuman !== true) newlyPinned.push({ title: entry.title });
+
+        const sameAsPrior = hashContent(entry.content) === hashContent(prior.content);
+
+        if (humanVerified) {
+            if (sameAsPrior) { skipped.push({ title: entry.title, reason: 'human-verified, unchanged' }); continue; }
+            contradictions.push({ title: entry.title, existing: prior.content, proposed: entry.content });
+            skipped.push({ title: entry.title, reason: 'human-verified, source contradiction reported' });
+            continue;
+        }
+
+        if (prior.stmbAutoContentHash && hashContent(entry.content) === prior.stmbAutoContentHash) {
+            skipped.push({ title: entry.title, reason: 'source unchanged' });
+            continue;
+        }
+
+        toWrite.push(entry);
+    }
+
+    return { toWrite, skipped, contradictions, newlyPinned };
+}
+
 // ---------------------------------------------------------------- the call
 
 /**
@@ -556,8 +695,13 @@ export async function generateOneShotEntries({ generate, prompt, cfg = {} }) {
 /**
  * Human-readable summary of a one-shot run, for the toast and the job detail.
  */
-export function summarizeOneShot({ created = 0, updated = 0, dropped = 0, collisions = [], keywordless = 0 } = {}) {
+export function summarizeOneShot({
+    created = 0, updated = 0, dropped = 0, collisions = [], keywordless = 0,
+    skipped = [], contradictions = [],
+} = {}) {
     const parts = [`one-shot lorebook: ${created} created, ${updated} updated`];
+    if (skipped.length) parts.push(`${skipped.length} entr${skipped.length === 1 ? 'y' : 'ies'} unchanged, skipped`);
+    if (contradictions.length) parts.push(`${contradictions.length} human-verified entr${contradictions.length === 1 ? 'y' : 'ies'} contradicted by new source (kept, reported)`);
     if (dropped) parts.push(`${dropped} unusable entr${dropped === 1 ? 'y' : 'ies'} dropped`);
     if (collisions.length) parts.push(`${collisions.length} keyword collision${collisions.length === 1 ? '' : 's'} resolved`);
     if (keywordless) parts.push(`${keywordless} entr${keywordless === 1 ? 'y' : 'ies'} left without a free keyword`);
