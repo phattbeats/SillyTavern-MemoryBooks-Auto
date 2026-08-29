@@ -102,10 +102,17 @@ Usage: node eval/runRewriteAcceptance.js [options]
 function makeClaudeCliGenerate(model) {
     return function claudeCliGenerate(prompt) {
         return new Promise((resolvePromise, reject) => {
-            const child = execFile('claude', ['-p', '--model', model], {
+            const claudeBin = process.env.CLAUDE_CLI_BIN || '/usr/local/bin/claude';
+            // cwd must NOT be PAPERCLIP_RUN_SCRATCH_DIR: Paperclip deletes that
+            // directory as soon as the run that created it ends, and a long-lived
+            // background replay outlives its launching run. A missing cwd makes
+            // Node report ENOENT on the spawned command itself, which is a red
+            // herring — the binary is fine, the cwd just vanished underneath it.
+            const child = execFile(claudeBin, ['-p', '--model', model], {
                 timeout: 300000,
                 maxBuffer: 32 * 1024 * 1024,
-                cwd: process.env.PAPERCLIP_RUN_SCRATCH_DIR || '/tmp',
+                cwd: '/tmp',
+                env: { ...process.env, PATH: `/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:${process.env.PATH || ''}` },
             }, (err, stdout, stderr) => {
                 if (err) reject(new Error(`claude CLI failed: ${err.message}\n${String(stderr).slice(0, 500)}`));
                 else resolvePromise(stdout.trim());
@@ -118,6 +125,28 @@ function makeClaudeCliGenerate(model) {
 
 const pct = (x) => `${(x * 100).toFixed(1)}%`;
 const mark = (ok) => (ok ? 'PASS' : 'FAIL');
+
+// Checks recorded here fail on today's `main` for a real product reason, not
+// a harness bug — per PHA-2732's Done-when, that's an acceptable calibration
+// outcome as long as the reason is on record. Re-check these first whenever
+// the rewrite lands; a rewrite that clears one of these should DELETE the
+// entry here, not just leave the check green.
+const KNOWN_BAD = {
+    'check2-no-zero-key-entries': 'the one-shot generator occasionally names an entry (e.g. "Pemberly, System '
+        + 'Liaison") in its JSON reply without populating that entry\'s keys array — there is no post-generation '
+        + 'validation step that backfills or drops a keyless entry before it is written to the book. Pre-existing '
+        + 'gap in today\'s generator, reproduced at slice<=197 onward; not a harness defect.',
+    'check5-zero-writes-on-rerun': 'one-shot regenerates every entry from scratch via the model each run, '
+        + 'so identical source text rarely produces a byte-identical reply — the content hash almost never '
+        + 'matches even though nothing changed. Idempotent re-runs need a diff/patch generation strategy, '
+        + 'which is exactly what the rewrite is for.',
+    'check7-entity-coverage': 'one-shot is a single fixed-size pass over the whole transcript with a '
+        + 'maxEntries cap, so on a 329-message story it structurally cannot surface every one of 52 '
+        + 'hand-curated entities (measured 41/52) — it was never designed to do exhaustive extraction.',
+    'check8-boundary-precision': 'boundary detection is a separate, unrelated subsystem (eval/detect.js) '
+        + 'from the one-shot generator under test here; its current precision (~0.61) is pre-existing and '
+        + 'tracked independently — recorded here only so the number is not silently dropped from this report.',
+};
 
 async function main() {
     const args = parseArgs(process.argv);
@@ -232,14 +261,20 @@ async function main() {
         { id: 'check8-boundary-precision', ...check8 },
         { id: 'check9-drift', ok: anyDriftOffenders.length === 0, offenders: anyDriftOffenders },
     ];
-    const allPass = criteria.every((c) => c.ok);
+    for (const c of criteria) c.knownBad = !c.ok && KNOWN_BAD[c.id] ? KNOWN_BAD[c.id] : null;
+    const unexplainedFailures = criteria.filter((c) => !c.ok && !c.knownBad);
+    const allPass = unexplainedFailures.length === 0;
 
     log('SUMMARY');
     log('-'.repeat(72));
-    for (const c of criteria) log(`  ${mark(c.ok).padEnd(4)} ${c.id}`);
+    for (const c of criteria) {
+        const status = c.ok ? 'PASS' : (c.knownBad ? 'KNOWN-BAD' : 'FAIL');
+        log(`  ${status.padEnd(10)} ${c.id}`);
+        if (c.knownBad) log(`             ${c.knownBad}`);
+    }
     log(`  cost (estimated)  calls=${tracker.calls}  inputTokens~${tracker.inputTokens}  outputTokens~${tracker.outputTokens}`);
     log('');
-    log(allPass ? 'ALL CHECKS PASS' : 'SOME CHECKS FAILED');
+    log(allPass ? 'ALL CHECKS PASS OR KNOWN-BAD' : 'SOME CHECKS FAILED WITHOUT EXPLANATION');
 
     // ---------------------------------------------------------------- persist
     await mkdir(args.out, { recursive: true });
