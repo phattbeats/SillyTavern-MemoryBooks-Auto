@@ -1,0 +1,47 @@
+# PHA-2732 acceptance harness (rewrite safety net)
+#
+# Runs the full `node --test` suite plus the PHA-2732 rewrite acceptance
+# harness (eval/rewriteAcceptance.js) on every push/PR. Offline by default:
+# no network, no API keys — the one-shot generation calls are replayed from
+# eval/fixtures/rewriteAcceptance-canned.json, a real model's output captured
+# once via `--live` (see eval/runRewriteAcceptance.js --help). The boundary
+# precision check (8) reuses a previously-captured real detector run
+# (eval/out/predictions.json, committed) for the same reason: measuring
+# regression doesn't require a fresh network call every run.
+
+name: acceptance-harness
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: node --test + PHA-2732 acceptance harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Whole suite (node:test)
+        run: node --test *.test.js eval/*.test.js
+
+      - name: PHA-2732 rewrite acceptance harness (offline, canned replay)
+        run: node eval/runRewriteAcceptance.js --json --out eval/reports/rewriteAcceptance
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rewrite-acceptance-report
+          path: eval/reports/rewriteAcceptance/report.json
