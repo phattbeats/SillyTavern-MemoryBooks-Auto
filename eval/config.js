@@ -8,7 +8,7 @@
 // no third-party dotenv package required.
 //
 // Required (for the OpenAI-compatible detector):
-//   STMB_BASE_URL   e.g. http://10.0.0.100:4000  (LiteLLM) or
+//   STMB_BASE_URL   e.g. http://<lan-host>:4000  (LiteLLM) or
 //                   https://api.openai.com/v1   (native)
 //   STMB_MODEL      e.g. claude-3-5-sonnet-20241022 or any alias
 //   STMB_API_KEY    Bearer token

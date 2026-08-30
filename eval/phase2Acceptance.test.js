@@ -13,6 +13,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 
 import {
     DEFAULT_FIXTURE,
@@ -30,6 +31,10 @@ import {
 } from './phase2Acceptance.js';
 import { AUTO_MODULE_DEFAULTS } from '../autoSettings.js';
 import { SENTINEL_DEFAULTS } from '../sentinelCore.js';
+
+// Local eval fixtures no longer ship with the repo; skip fixture-bound tests
+// when they are absent (see eval/parser.test.js for the same convention).
+const HAVE_LOCAL_FIXTURES = existsSync(DEFAULT_FIXTURE);
 
 // ----------------------------------------------------------------------------
 // Index-space conversion
@@ -152,7 +157,7 @@ test('the production cadence is 8, as Phase 2 specifies', () => {
 // the over-merged key an oracle detector could only score P=0.33 against; 35 is
 // the key the original Phase-0 eval's 0.969 was measured on. Criterion 1 below
 // still holds at full coverage — it now holds against 13 more boundaries.
-test('the bundled fixture parses to ~329 messages with 35 ground-truth boundaries', async () => {
+test('the bundled fixture parses to ~329 messages with 35 ground-truth boundaries', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const fx = await loadFixture(DEFAULT_FIXTURE);
     assert.equal(fx.chat.length, 329);
     assert.equal(fx.evalBoundaries.length, 35, 'fine-grained merged ground truth');
@@ -164,7 +169,7 @@ test('the bundled fixture parses to ~329 messages with 35 ground-truth boundarie
 // Acceptance criteria 1 & 2 — coverage and mid-scene cuts
 // ----------------------------------------------------------------------------
 
-test('CRITERION 1: scene memories reproduce every Phase 0 ground-truth boundary', async () => {
+test('CRITERION 1: scene memories reproduce every Phase 0 ground-truth boundary', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const fx = await loadFixture();
     const run = await runIncremental({ chat: fx.chat, boundaries: fx.boundaries });
     const cov = scoreBoundaryCoverage(run.processedRanges, fx.boundaries);
@@ -174,14 +179,14 @@ test('CRITERION 1: scene memories reproduce every Phase 0 ground-truth boundary'
     assert.equal(run.processedRanges.length, 35);
 });
 
-test('CRITERION 1: the run leaves no gaps in the covered span', async () => {
+test('CRITERION 1: the run leaves no gaps in the covered span', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const fx = await loadFixture();
     const run = await runIncremental({ chat: fx.chat, boundaries: fx.boundaries });
     assert.deepEqual(findGaps(run.processedRanges), []);
     assert.equal(run.processedRanges[0][0], 0, 'starts at the first message');
 });
 
-test('CRITERION 1: the run does not burn a detection call per message (PHA-1547)', async () => {
+test('CRITERION 1: the run does not burn a detection call per message (PHA-1547)', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     // The cadence gate used to be a LEVEL trigger: true on every message once
     // the backlog passed cadenceN, so the fixture cost 279 cycles for 22
     // memories — 257 of them fruitless. Offline that is just a counter; in
@@ -208,7 +213,7 @@ test('CRITERION 1: the run does not burn a detection call per message (PHA-1547)
     );
 });
 
-test('CRITERION 1: backing off never starves coverage, at any settable cadence', async () => {
+test('CRITERION 1: backing off never starves coverage, at any settable cadence', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     // The opposite failure the edge trigger could cause: back off further than
     // the window can look back and messages fall between two looks, never to be
     // re-examined. Unclamped, cadence 24 / window 16 drops this fixture to 8/19
@@ -228,14 +233,14 @@ test('CRITERION 1: backing off never starves coverage, at any settable cadence',
     }
 });
 
-test('CRITERION 2: zero mid-scene cuts', async () => {
+test('CRITERION 2: zero mid-scene cuts', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const fx = await loadFixture();
     const run = await runIncremental({ chat: fx.chat, boundaries: fx.boundaries });
     const { cuts } = findMidSceneCuts(run.processedRanges, fx.boundaries);
     assert.deepEqual(cuts, [], `mid-scene cuts: ${JSON.stringify(cuts)}`);
 });
 
-test('CRITERION 2: the guard keeps the live scene unmemorized (one scene behind)', async () => {
+test('CRITERION 2: the guard keeps the live scene unmemorized (one scene behind)', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const fx = await loadFixture();
     const run = await runIncremental({ chat: fx.chat, boundaries: fx.boundaries });
     const lastIndex = fx.chat.length - 1;
@@ -250,7 +255,7 @@ test('CRITERION 2: the guard keeps the live scene unmemorized (one scene behind)
 // Acceptance criterion 3 — reload mid-cycle produces no duplicates
 // ----------------------------------------------------------------------------
 
-test('CRITERION 3: resuming from the persisted watermark duplicates no work', async () => {
+test('CRITERION 3: resuming from the persisted watermark duplicates no work', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const fx = await loadFixture();
     // Run until 8 scenes are memorized, then drop all in-memory state.
     const before = await runIncremental({
@@ -276,7 +281,7 @@ test('CRITERION 3: resuming from the persisted watermark duplicates no work', as
     assert.deepEqual(findGaps(all), [], 'the reload must not skip messages either');
 });
 
-test('CRITERION 3: a reloaded run produces the identical range list to an uninterrupted one', async () => {
+test('CRITERION 3: a reloaded run produces the identical range list to an uninterrupted one', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const fx = await loadFixture();
     const uninterrupted = await runIncremental({ chat: fx.chat, boundaries: fx.boundaries });
     const before = await runIncremental({
@@ -301,7 +306,7 @@ test('CRITERION 3: a reloaded run produces the identical range list to an uninte
 // Acceptance criterion 4 — stopping the sentinel
 // ----------------------------------------------------------------------------
 
-test('CRITERION 4: an abort signal halts a cycle mid-flight, keeping finished scenes', async () => {
+test('CRITERION 4: an abort signal halts a cycle mid-flight, keeping finished scenes', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const fx = await loadFixture();
     const run = await runIncremental({
         chat: fx.chat,
@@ -321,7 +326,7 @@ test('CRITERION 4: an abort signal halts a cycle mid-flight, keeping finished sc
     assert.equal(cancelledCycles[0].action, 'abort:cancelled');
 });
 
-test('CRITERION 4: the abort is recorded in the P2.3 ring buffer, not silently swallowed', async () => {
+test('CRITERION 4: the abort is recorded in the P2.3 ring buffer, not silently swallowed', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const fx = await loadFixture();
     const run = await runIncremental({
         chat: fx.chat,
@@ -333,7 +338,7 @@ test('CRITERION 4: the abort is recorded in the P2.3 ring buffer, not silently s
     assert.ok(run.cycleLog.some((e) => e.status === 'cancelled'));
 });
 
-test('CRITERION 4: turning the sentinel off stops every cycle at the factory gate', async () => {
+test('CRITERION 4: turning the sentinel off stops every cycle at the factory gate', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const fx = await loadFixture();
     const run = await runIncremental({
         chat: fx.chat,

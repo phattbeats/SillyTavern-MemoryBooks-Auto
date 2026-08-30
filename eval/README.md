@@ -5,6 +5,15 @@ Reproduces the scene-boundary detection experiment from
 Satire Fantasy Isekai fixture. Phase 0 acceptance gate: **precision ≥ 0.9 at
 ±1 message tolerance** against the raw ground-truth boundary set.
 
+> **Local-only fixtures.** The captured roleplay transcript and everything
+> derived from it (`fixtures/transcript*.jsonl|md`, `fixtures/worldbook.json`,
+> `fixtures/rewriteAcceptance-canned.json`, `out/fixture*.json`, the
+> `materials/stmb-auto/` transcript and worldbook) are personal chat-log
+> material and are not distributed with the repo (see `.gitignore`). Tests
+> and the acceptance harnesses that need them skip cleanly when they are
+> absent; to run the full suite, supply your own SillyTavern JSONL export at
+> those paths (or recapture with `runRewriteAcceptance.js --live --recapture`).
+
 ## Result
 
 ### Reference (P0.4 / P6.1, against `parse-transcript.js`)
