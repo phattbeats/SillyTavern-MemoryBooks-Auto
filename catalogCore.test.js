@@ -12,7 +12,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -42,6 +42,7 @@ import { CLIP_CONTEXT_TITLE_SUFFIX } from './clipperPlusCore.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_LOREBOOK = join(HERE, 'eval', 'materials', 'stmb-auto', 'Magisa-_satire_fantasy_isekai_world.json');
+const HAVE_LOCAL_FIXTURES = existsSync(FIXTURE_LOREBOOK);
 
 // ---------------------------------------------------------------- helpers
 
@@ -118,8 +119,8 @@ test('classifyEntryKind: everything else is manual, including junk input', () =>
 // ---------------------------------------------------------------- entity names
 
 test('extractEntryEntityNames: keywords lead, title follows, dedup is case-insensitive', () => {
-    const names = extractEntryEntityNames(entry({ key: ['Brandon', 'brandon', 'Kelly'], comment: 'Protagonist' }));
-    assert.deepEqual(names, ['Brandon', 'Kelly', 'Protagonist']);
+    const names = extractEntryEntityNames(entry({ key: ['Rowan', 'rowan', 'Hale'], comment: 'Protagonist' }));
+    assert.deepEqual(names, ['Rowan', 'Hale', 'Protagonist']);
 });
 
 test('extractEntryEntityNames: a title already present as a keyword is not repeated', () => {
@@ -152,8 +153,8 @@ test('summarizeEntryContent: prose entries summarize to their opening sentence',
 });
 
 test('summarizeEntryContent: field-style entries join leading fields', () => {
-    const s = summarizeEntryContent('Name: Brandon Kelly\nAge: Teens\nRace: Human', 60);
-    assert.match(s, /^Name: Brandon Kelly; Age: Teens/);
+    const s = summarizeEntryContent('Name: Rowan Hale\nAge: Adult\nRace: Human', 60);
+    assert.match(s, /^Name: Rowan Hale; Age: Adult/);
 });
 
 test('summarizeEntryContent: provenance stamps are stripped, not summarized', () => {
@@ -484,7 +485,7 @@ test('formatCatalogLines: one line per enabled entry, disabled hidden by default
 
 // ---------------------------------------------------------------- fixture gate
 
-test('ACCEPTANCE: the 328-msg fixture lorebook serializes inside the chat_metadata budget', () => {
+test('ACCEPTANCE: the 328-msg fixture lorebook serializes inside the chat_metadata budget', { skip: !HAVE_LOCAL_FIXTURES }, () => {
     const lore = JSON.parse(readFileSync(FIXTURE_LOREBOOK, 'utf8'));
     const entryCount = Object.keys(lore.entries).length;
     assert.equal(entryCount, 52, 'fixture drifted — re-check the numbers below');
@@ -529,7 +530,7 @@ test('ACCEPTANCE: the 328-msg fixture lorebook serializes inside the chat_metada
     );
 });
 
-test('ACCEPTANCE: stale detection round-trips on the fixture lorebook', () => {
+test('ACCEPTANCE: stale detection round-trips on the fixture lorebook', { skip: !HAVE_LOCAL_FIXTURES }, () => {
     const lore = JSON.parse(readFileSync(FIXTURE_LOREBOOK, 'utf8'));
     const catalog = buildCatalog(lore, { now: FIXED_NOW, lorebookName: 'Magisa' });
 

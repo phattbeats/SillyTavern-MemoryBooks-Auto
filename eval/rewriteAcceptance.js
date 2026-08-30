@@ -1,5 +1,5 @@
 // Copyright (C) 2024–2026 Aiko Hanasaki
-// Copyright (C) 2026 Brandon Kelly
+// Copyright (C) 2026 phattbeats
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // eval/rewriteAcceptance.js — PHA-2732: the rewrite's acceptance harness.

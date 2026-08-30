@@ -6,6 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 
 import {
     DEFAULT_FIXTURE,
@@ -27,11 +28,15 @@ import {
     mergeAuditRuns,
 } from './phase5Acceptance.js';
 
+// Local eval fixtures no longer ship with the repo; skip fixture-bound tests
+// when they are absent (see eval/parser.test.js for the same convention).
+const HAVE_LOCAL_FIXTURES = existsSync(DEFAULT_FIXTURE) && existsSync(DEFAULT_WORLDBOOK);
+
 // ----------------------------------------------------------------------------
 // Fixture loading
 // ----------------------------------------------------------------------------
 
-test('loadFixture returns the bundled 328+ message transcript', async () => {
+test('loadFixture returns the bundled 328+ message transcript', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { chat, warnings } = await loadFixture();
     assert.ok(Array.isArray(chat), 'chat should be an array');
     // The plan §6 acceptance is "328-msg fixture"; the bundled jsonl is
@@ -42,7 +47,7 @@ test('loadFixture returns the bundled 328+ message transcript', async () => {
     assert.equal(warnings.length, 0, 'no parser warnings expected');
 });
 
-test('loadFixture messages carry {mes, name, is_user, is_system}', async () => {
+test('loadFixture messages carry {mes, name, is_user, is_system}', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { chat } = await loadFixture();
     const m = chat[0];
     assert.ok(m, 'first message should exist');
@@ -55,7 +60,7 @@ test('loadFixture messages carry {mes, name, is_user, is_system}', async () => {
 // Chunk plan + per-chunk cap
 // ----------------------------------------------------------------------------
 
-test('planAuditChunks produces at least 1 chunk for the 328-msg fixture', async () => {
+test('planAuditChunks produces at least 1 chunk for the 328-msg fixture', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { chat } = await loadFixture();
     const msgs = extractAuditMessages(chat);
     const chunks = planAuditChunks(msgs);
@@ -65,7 +70,7 @@ test('planAuditChunks produces at least 1 chunk for the 328-msg fixture', async 
     assert.equal(total, msgs.length, 'all messages should be covered');
 });
 
-test('every chunk stays under the per-chunk token cap', async () => {
+test('every chunk stays under the per-chunk token cap', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { chat } = await loadFixture();
     const msgs = extractAuditMessages(chat);
     const chunks = planAuditChunks(msgs, {
@@ -77,7 +82,7 @@ test('every chunk stays under the per-chunk token cap', async () => {
     assert.ok(check.maxSize > 0, 'max size should be positive');
 });
 
-test('chunk plan for the 328-msg fixture plans into a reasonable number of chunks', async () => {
+test('chunk plan for the 328-msg fixture plans into a reasonable number of chunks', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { chat } = await loadFixture();
     const msgs = extractAuditMessages(chat);
     const chunks = planAuditChunks(msgs);
@@ -88,7 +93,7 @@ test('chunk plan for the 328-msg fixture plans into a reasonable number of chunk
         `expected 5-20 chunks, got ${chunks.length}`);
 });
 
-test('extractAuditMessages drops system messages and preserves chat index', async () => {
+test('extractAuditMessages drops system messages and preserves chat index', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { chat } = await loadFixture();
     const msgs = extractAuditMessages(chat);
     for (const m of msgs) {
@@ -155,14 +160,14 @@ test('deserializeCheckpoint returns empty defaults for null / malformed input', 
 // Worldbook preparation
 // ----------------------------------------------------------------------------
 
-test('prepareLorebook marks every entry stmemorybooks=true', async () => {
+test('prepareLorebook marks every entry stmemorybooks=true', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { entries } = await prepareLorebook(DEFAULT_WORLDBOOK, { plantedKeyword: null });
     for (const e of Object.values(entries)) {
         assert.equal(e.stmemorybooks, true);
     }
 });
 
-test('prepareLorebook removes the configured character entry', async () => {
+test('prepareLorebook removes the configured character entry', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const deleted = PHASE5_DEFAULTS.deletedCharacter.name;
     const { entries, deletedUid } = await prepareLorebook(DEFAULT_WORLDBOOK, { plantedKeyword: null });
     for (const [uid, e] of Object.entries(entries)) {
@@ -173,7 +178,7 @@ test('prepareLorebook removes the configured character entry', async () => {
     assert.ok(deletedUid !== null, 'expected a deleted uid to be reported');
 });
 
-test('prepareLorebook plants an entry with only the common word as keyword', async () => {
+test('prepareLorebook plants an entry with only the common word as keyword', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { entries, plantedUid } = await prepareLorebook(DEFAULT_WORLDBOOK, {
         plantedKeyword: 'button',
     });
@@ -183,7 +188,7 @@ test('prepareLorebook plants an entry with only the common word as keyword', asy
     assert.equal(planted.stmemorybooks, true);
 });
 
-test('prepareLorebook leaves the existing "Button Firewood" character intact (multi-keyword; not flagged)', async () => {
+test('prepareLorebook leaves the existing "Button Firewood" character intact (multi-keyword; not flagged)', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { entries } = await prepareLorebook(DEFAULT_WORLDBOOK, { plantedKeyword: 'button' });
     // The original "Button" character has multiple keys, so it should NOT
     // be removed by the deletion step (different name from "Gruk") and NOT
@@ -198,7 +203,7 @@ test('prepareLorebook leaves the existing "Button Firewood" character intact (mu
 // Coverage report catches a deleted character (criterion 3)
 // ----------------------------------------------------------------------------
 
-test('runAuditWalk flags the deleted character in the coverage report', async () => {
+test('runAuditWalk flags the deleted character in the coverage report', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { chat } = await loadFixture();
     const deleted = PHASE5_DEFAULTS.deletedCharacter.name;
     const { entries } = await prepareLorebook(DEFAULT_WORLDBOOK, { plantedKeyword: null });
@@ -231,7 +236,7 @@ test('runAuditWalk flags the deleted character in the coverage report', async ()
 // Technical pass catches a planted keyword collision (criterion 4)
 // ----------------------------------------------------------------------------
 
-test('runAuditWalk flags the planted "button" entry in the technical report', async () => {
+test('runAuditWalk flags the planted "button" entry in the technical report', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { chat } = await loadFixture();
     const { entries, plantedUid } = await prepareLorebook(DEFAULT_WORLDBOOK, {
         plantedKeyword: 'button',
@@ -257,7 +262,7 @@ test('runAuditWalk flags the planted "button" entry in the technical report', as
     assert.equal(planted.severity, 'error');
 });
 
-test('runAuditWalk does NOT flag the multi-keyword "Button Firewood" character (existing fixture entry)', async () => {
+test('runAuditWalk does NOT flag the multi-keyword "Button Firewood" character (existing fixture entry)', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { chat } = await loadFixture();
     const { entries } = await prepareLorebook(DEFAULT_WORLDBOOK, { plantedKeyword: 'button' });
     const knownNames = new Set();
@@ -287,7 +292,7 @@ test('runAuditWalk does NOT flag the multi-keyword "Button Firewood" character (
 // Reload mid-run produces no duplicates (criterion 2)
 // ----------------------------------------------------------------------------
 
-test('runAuditWalk survives a mid-run reload without duplicating work', async () => {
+test('runAuditWalk survives a mid-run reload without duplicating work', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { chat } = await loadFixture();
     const { entries } = await prepareLorebook(DEFAULT_WORLDBOOK, { plantedKeyword: 'button' });
     const knownNames = new Set();
@@ -330,7 +335,7 @@ test('runAuditWalk survives a mid-run reload without duplicating work', async ()
         `merged run should cover all ${before.totalChunks} chunks, got ${merged.processedChunks.length}`);
 });
 
-test('runAuditWalk respects an explicit cancel signal at a chunk boundary', async () => {
+test('runAuditWalk respects an explicit cancel signal at a chunk boundary', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { chat } = await loadFixture();
     const { entries } = await prepareLorebook(DEFAULT_WORLDBOOK, { plantedKeyword: null });
     const knownNames = new Set();
@@ -366,7 +371,7 @@ test('runAuditWalk respects an explicit cancel signal at a chunk boundary', asyn
 // Per-chunk token cap is real (criterion 1)
 // ----------------------------------------------------------------------------
 
-test('walk in production has every chunk under the 20K token cap (criterion 1)', async () => {
+test('walk in production has every chunk under the 20K token cap (criterion 1)', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
     const { chat } = await loadFixture();
     const { entries } = await prepareLorebook(DEFAULT_WORLDBOOK, { plantedKeyword: 'button' });
     const knownNames = new Set();

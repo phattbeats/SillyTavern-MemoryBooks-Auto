@@ -24,7 +24,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -504,6 +504,7 @@ test.describe('§replay — one call per scene, zero inside one', () => {
 test.describe('§latency — added wall-time on cached and scene-change turns', () => {
     const FIXTURE = join(HERE, 'eval', 'materials', 'stmb-auto', 'Magisa-_satire_fantasy_isekai_world.json');
     const TRANSCRIPT = join(HERE, 'eval', 'materials', 'stmb-auto', 'Satire Fantasy Isekai - 2026-07-12@10h18m29s211ms.jsonl');
+    const HAVE_LOCAL_FIXTURES = existsSync(FIXTURE) && existsSync(TRANSCRIPT);
 
     /** The committed fixture lorebook, as the catalog builder sees it. */
     function loadFixture() {
@@ -573,7 +574,7 @@ test.describe('§latency — added wall-time on cached and scene-change turns', 
         return log;
     }
 
-    test('replaying the 328-message fixture: <=50ms cached, <=2s on a scene change', async () => {
+    test('replaying the 328-message fixture: <=50ms cached, <=2s on a scene change', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const { catalog, entries } = loadFixture();
         const chat = loadChat();
         assert.equal(chat.length > 300, true, `fixture transcript looks wrong: ${chat.length} messages`);

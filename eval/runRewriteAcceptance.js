@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Copyright (C) 2024–2026 Aiko Hanasaki
-// Copyright (C) 2026 Brandon Kelly
+// Copyright (C) 2026 phattbeats
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // eval/runRewriteAcceptance.js — CLI runner for the PHA-2732 acceptance harness.
@@ -152,6 +152,22 @@ async function main() {
     const args = parseArgs(process.argv);
     if (args.help) { printHelp(); process.exit(0); }
     const log = args.json ? () => {} : (...a) => console.log(...a);
+
+    // The captured roleplay transcript and everything derived from it are
+    // local-only (untracked — see .gitignore). Without them there is nothing
+    // to replay: record a skipped report so CI's upload step still has a
+    // file, and exit green rather than failing on a fixture we no longer ship.
+    const { existsSync } = await import('node:fs');
+    const needed = [args.transcript, args.referenceBook, ...(args.live ? [] : [args.canned])];
+    const missing = needed.filter((p) => !existsSync(p));
+    if (missing.length) {
+        await mkdir(args.out, { recursive: true });
+        const report = { skipped: true, reason: 'local-only eval fixtures not present', missing };
+        await writeFile(resolve(args.out, 'report.json'), `${JSON.stringify(report, null, 2)}\n`);
+        log(`SKIPPED: local-only eval fixtures not present:\n  ${missing.join('\n  ')}`);
+        if (args.json) console.log(JSON.stringify(report));
+        process.exit(0);
+    }
 
     log('PHA-2732 rewrite acceptance harness');
     log('='.repeat(72));

@@ -27,3 +27,14 @@ eval/reports/rewriteAcceptance/*
 eval/predictions*.json
 eval/.env
 .env
+
+# Local-only eval material: captured roleplay transcripts and derived fixtures
+# are not distributed with the repo. Recapture locally (see eval/README.md).
+eval/fixtures/transcript.jsonl
+eval/fixtures/transcript-markdown.md
+eval/fixtures/worldbook.json
+eval/fixtures/rewriteAcceptance-canned.json
+eval/out/fixture.json
+eval/out/fixture-md.json
+eval/materials/stmb-auto/*.jsonl
+eval/materials/stmb-auto/Magisa-_satire_fantasy_isekai_world.json

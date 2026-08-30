@@ -1,5 +1,5 @@
 // Copyright (C) 2024–2026 Aiko Hanasaki
-// Copyright (C) 2026 Brandon Kelly
+// Copyright (C) 2026 phattbeats
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // eval/rewriteAcceptance.test.js — PHA-2732 harness self-test.
@@ -14,6 +14,7 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 
 import {
     loadFixture,
@@ -34,7 +35,12 @@ import {
     withCostTracking,
     makeCannedGenerate,
     DEFAULT_REFERENCE_BOOK,
+    DEFAULT_TRANSCRIPT,
 } from './rewriteAcceptance.js';
+
+// Local eval fixtures no longer ship with the repo; skip fixture-bound tests
+// when they are absent (see eval/parser.test.js for the same convention).
+const HAVE_LOCAL_FIXTURES = existsSync(DEFAULT_TRANSCRIPT) && existsSync(DEFAULT_REFERENCE_BOOK);
 
 // ---------------------------------------------------------------- fixtures
 
@@ -251,7 +257,7 @@ describe('scoreEntityCoverage', () => {
         assert.deepEqual(r.extra, ['A Nobody']);
     });
 
-    test('the real Magisa reference book loads with 52 entries', async () => {
+    test('the real Magisa reference book loads with 52 entries', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const ref = await loadReferenceBook(DEFAULT_REFERENCE_BOOK);
         assert.equal(ref.length, 52);
     });
@@ -260,7 +266,7 @@ describe('scoreEntityCoverage', () => {
 // ---------------------------------------------------------------- check 8
 
 describe('checkBoundaryPrecision', () => {
-    test('runs against the committed transcript + a previously-captured real prediction set', async () => {
+    test('runs against the committed transcript + a previously-captured real prediction set', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const { messages } = await loadFixture();
         const r = await checkBoundaryPrecision({ messages });
         assert.ok(r.precision >= 0 && r.precision <= 1, `precision out of range: ${r.precision}`);
