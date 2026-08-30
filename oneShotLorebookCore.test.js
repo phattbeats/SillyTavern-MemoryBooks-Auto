@@ -24,6 +24,8 @@ import {
     formatTranscript,
     generateOneShotEntries,
     hashContent,
+    migrateProvenanceShape,
+    needsProvenanceMigration,
     normalizeKeyword,
     parseOneShotEntries,
     salvageEntryObjects,
@@ -346,6 +348,13 @@ test('summarizeOneShot reports what actually happened', () => {
         /2 unusable entries dropped · 1 keyword collision resolved · 1 entry left without a free keyword/);
 });
 
+test('summarizeOneShot surfaces inferred claims and ignored renames (review finding 4 consumer)', () => {
+    assert.match(summarizeOneShot({ created: 1, inferred: 2 }),
+        /2 entries written with an unstated \(inferred\) claim — worth a source check/);
+    assert.match(summarizeOneShot({ created: 0, updated: 1, renamed: [{ uid: 1, from: 'A', to: 'B' }] }),
+        /1 rename of a pinned entry ignored \(kept the human-verified title\)/);
+});
+
 // ---------------------------------------------------------------- acceptance
 
 test('ACCEPTANCE: one run produces zero cross-entry keyword collisions, post-hoc dedup disabled', async () => {
@@ -421,10 +430,58 @@ test('attributeSources: near-verbatim content is stated, novel phrasing is infer
     ];
     const stated = attributeSources('The bridge collapsed last spring.', messages);
     assert.equal(stated.confidence, 'stated');
-    assert.equal(stated.sourceRef, '5');
+    assert.deepEqual(stated.sourceRef, [5]);
+    assert.equal(stated.facts.length, 1);
+    assert.equal(stated.facts[0].confidence, 'stated');
+    assert.deepEqual(stated.facts[0].sourceRef, [5]);
 
     const inferred = attributeSources('Marcus and Elena are secretly plotting a coup against the council.', messages);
     assert.equal(inferred.confidence, 'inferred');
+    assert.deepEqual(inferred.sourceRef, []);
+});
+
+test('attributeSources: per-fact, not per-entry — one inferred sentence flips the whole entry (review finding 2)', () => {
+    const messages = [
+        { id: 3, text: 'The bridge collapsed last spring, everyone in town remembers it.' },
+        { id: 40, text: 'Marcus stood on the riverbank and watched the water rise for hours.' },
+        { id: 200, text: 'Elena kept a cover story ready, just in case anyone asked where she had been.' },
+    ];
+    // Two well-sourced sentences plus one the story never actually said — a
+    // >=50% majority vote would read this whole entry as "stated" and hide
+    // the bad claim exactly like the worked example in the issue.
+    const content = 'The bridge collapsed last spring. Marcus watched the water rise for hours. '
+        + 'Marcus and Elena are secretly having an affair.';
+    const result = attributeSources(content, messages);
+    assert.equal(result.facts.length, 3);
+    assert.equal(result.facts[0].confidence, 'stated');
+    assert.equal(result.facts[1].confidence, 'stated');
+    assert.equal(result.facts[2].confidence, 'inferred');
+    // Entry-level rollup surfaces the one bad sentence rather than averaging it away.
+    assert.equal(result.confidence, 'inferred');
+    // Full id list, not a collapsed "3-200" span (review finding 3).
+    assert.deepEqual(result.sourceRef, [3, 40]);
+});
+
+test('attributeSources: reads the real extractAuditMessages shape (rawText), not just test fixtures\' text/mes', () => {
+    // extractAuditMessages (auditorCore.js) emits {id, speaker, rawText} — the
+    // ACTUAL shape plan.messages carries at runtime. A prior bug read only
+    // .text/.mes, so every real message scored as empty text and every entry
+    // came back 'inferred' regardless of content.
+    const messages = [{ id: 5, speaker: 'Narrator', rawText: 'The bridge collapsed last spring.' }];
+    const result = attributeSources('The bridge collapsed last spring.', messages);
+    assert.equal(result.confidence, 'stated');
+    assert.deepEqual(result.sourceRef, [5]);
+});
+
+test('needsProvenanceMigration / migrateProvenanceShape: upgrade the old collapsed-span shape', () => {
+    assert.equal(needsProvenanceMigration({ stmbAutoSourceRef: [3, 40] }), false);
+    assert.equal(needsProvenanceMigration({ stmbAutoSourceRef: '' }), false);
+    assert.equal(needsProvenanceMigration({}), false);
+    assert.equal(needsProvenanceMigration({ stmbAutoSourceRef: '3-200' }), true);
+
+    assert.equal(migrateProvenanceShape({ stmbAutoSourceRef: [3, 40] }), null);
+    assert.deepEqual(migrateProvenanceShape({ stmbAutoSourceRef: '3-200' }), { stmbAutoSourceRef: [3, 200] });
+    assert.deepEqual(migrateProvenanceShape({ stmbAutoSourceRef: '5' }), { stmbAutoSourceRef: [5] });
 });
 
 test('applyProvenancePinning: unchanged source is skipped, not rewritten', () => {
@@ -463,4 +520,54 @@ test('applyProvenancePinning: a previously-pinned entry stays pinned even once t
 test('applyProvenancePinning: a brand new entry with no prior always writes', () => {
     const { toWrite } = applyProvenancePinning([{ title: 'New Guy', content: 'Some new content.' }], []);
     assert.equal(toWrite.length, 1);
+});
+
+// ---------------------------------------------------------------- PHA-2681 review finding 5: rename
+
+test('applyProvenancePinning: a renamed pinned entry keeps its pin instead of duplicating', () => {
+    const existing = [{
+        title: 'Button', uid: 7, content: 'Button is a synth.',
+        stmbAutoVerifiedByHuman: true, stmbAutoContentHash: hashContent('Button is a synth.'),
+    }];
+    const generated = [{ title: 'Button Firewood', content: 'Button is a synth.' }];
+    const { toWrite, skipped, renamed } = applyProvenancePinning(generated, existing);
+    assert.deepEqual(toWrite, []);
+    assert.equal(skipped.length, 1);
+    assert.equal(skipped[0].reason, 'human-verified, unchanged (rename ignored)');
+    assert.deepEqual(renamed, [{ uid: 7, from: 'Button', to: 'Button Firewood' }]);
+});
+
+test('applyProvenancePinning: a renamed pinned entry with a genuine contradiction is reported, not duplicated', () => {
+    const existing = [{
+        title: 'Button', uid: 7, content: 'Button is human.',
+        stmbAutoVerifiedByHuman: true, stmbAutoContentHash: hashContent('Button is human.'),
+    }];
+    const generated = [{ title: 'Button Firewood', content: 'Button is a synth, revealed in chapter 9.' }];
+    const { toWrite, contradictions, renamed } = applyProvenancePinning(generated, existing);
+    assert.deepEqual(toWrite, []);
+    assert.equal(contradictions.length, 1);
+    assert.equal(contradictions[0].renamedFrom, 'Button');
+    assert.equal(renamed.length, 0, 'a contradiction does not apply the rename either');
+});
+
+test('applyProvenancePinning: rename fallback never fires for a prior that is not human-verified', () => {
+    const existing = [{ title: 'Button', content: 'Button is a synth.', stmbAutoContentHash: hashContent('Button is a synth.') }];
+    const generated = [{ title: 'Button Firewood', content: 'Button is a synth, reworded slightly.' }];
+    const { toWrite, renamed } = applyProvenancePinning(generated, existing);
+    assert.equal(renamed.length, 0);
+    assert.equal(toWrite.length, 1, 'ordinary (non-pinned) renames are out of scope — treated as a new entry');
+});
+
+test('applyProvenancePinning: an exact title match is never stolen by another entry\'s rename fallback', () => {
+    const existing = [
+        { title: 'Button', uid: 7, content: 'Button is a synth.', stmbAutoVerifiedByHuman: true, stmbAutoContentHash: hashContent('Button is a synth.') },
+    ];
+    const generated = [
+        { title: 'Button', content: 'Button is a synth.' },          // legit exact update
+        { title: 'Button Firewood', content: 'Someone unrelated.' }, // must NOT also claim "Button" as its prior
+    ];
+    const { toWrite, renamed } = applyProvenancePinning(generated, existing);
+    assert.equal(renamed.length, 0);
+    assert.equal(toWrite.length, 1);
+    assert.equal(toWrite[0].title, 'Button Firewood');
 });
