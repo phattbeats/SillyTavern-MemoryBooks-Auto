@@ -4,6 +4,7 @@
 import { getCurrentChatId, name1, name2, chat_metadata, saveMetadata } from '../../../../script.js';
 import { createNewWorldInfo, METADATA_KEY, world_names } from '../../../world-info.js';
 import { translate } from '../../../i18n.js';
+import { applyLorebookNameTemplate } from './lorebookNameTemplate.js';
 
 const MODULE_NAME = 'STMemoryBooks-AutoCreate';
 
@@ -37,10 +38,13 @@ export function generateLorebookName(template) {
     const charName = name2 || i18n('common.unknown', 'Unknown');
     const userName = name1 || i18n('addlore.defaults.user', 'User');
 
-    let name = template
-        .replace(/\{\{chat\}\}/g, chatId)
-        .replace(/\{\{char\}\}/g, charName)
-        .replace(/\{\{user\}\}/g, userName);
+    // PHA-2675: segment-wise substitution so a template literal the character
+    // name already carries (e.g. a "[E2E] " prefix) isn't applied twice.
+    let name = applyLorebookNameTemplate(template, {
+        chat: chatId,
+        char: charName,
+        user: userName,
+    });
 
     // Sanitize for filesystem - only block reserved characters, allow Unicode
     // Reserve 4 chars for potential " 999" suffix
