@@ -24,6 +24,10 @@ eval/reports/phase7/*
 !eval/reports/rewriteAcceptance/
 eval/reports/rewriteAcceptance/*
 !eval/reports/rewriteAcceptance/evidence.md
+# …and the PHA-2693 N-slice replay evidence, same deal.
+!eval/reports/incrementalReplay/
+eval/reports/incrementalReplay/*
+!eval/reports/incrementalReplay/evidence.md
 eval/predictions*.json
 eval/.env
 .env

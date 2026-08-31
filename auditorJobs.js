@@ -161,6 +161,10 @@ export function entriesForCoverage(lorebookData) {
             stmbAutoContentHash: entry.stmbAutoContentHash,
             stmbAutoVerifiedByHuman: entry.stmbAutoVerifiedByHuman === true,
             stmbAutoConfidence: entry.stmbAutoConfidence,
+            // PHA-2693: how far the run that wrote this entry had read. Without
+            // it here every incremental run reads "no record of a prior run"
+            // and falls back to a full rebuild — safe, but silently pointless.
+            stmbAutoRunHighWater: entry.stmbAutoRunHighWater,
         });
     }
     return out;

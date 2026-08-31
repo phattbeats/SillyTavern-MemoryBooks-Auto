@@ -34,6 +34,24 @@
 //   transcript slices, so the harness exercises "many sessions, story growing
 //   between them" rather than a single before/after diff.
 //
+//   PHA-2693 REPORT DIMENSIONS — the rest of what the N-slice verification
+//   section asks for, layered on the same replay:
+//    10. checkIdempotence          — a second pass over the SAME slice leaves
+//                                    the book byte-identical (stronger than
+//                                    check 5, which only asks what the pinning
+//                                    stage decided)
+//    11. checkCorrectionDurability — a hand-edit at step K is still there at
+//                                    step N, and later contradictions were
+//                                    reported rather than applied
+//    12. provenanceSpotCheck       — 5 entries with their `src: msgs` citations
+//                                    and the cited message text inline.
+//                                    Reported for a human to judge, never
+//                                    asserted
+//    13. compareCost               — incremental vs one full rebuild, input and
+//                                    output NEVER summed (see compareCost)
+//   Per step, replayNSlices also reports regenerated-vs-total, frozen vs stale,
+//   and per-step cost.
+//
 // WHAT THIS EXERCISES, AND WHAT IT DOES NOT
 // ------------------------------------------
 // This harness drives the ONE-SHOT lorebook path (oneShotLorebookCore.js),
@@ -96,6 +114,10 @@ import {
     findKeywordCollisions,
     normalizeKeyword,
     containsWholeWord,
+    collectPriorAwards,
+    dropFrozenEntries,
+    planIncrementalRun,
+    transcriptHighWater,
 } from '../oneShotLorebookCore.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -227,6 +249,11 @@ export function upsertByTitle(book, title, content, overrides = {}) {
         stmbAutoContentHash: overrides.stmbAutoContentHash,
         stmbAutoVerifiedByHuman: overrides.stmbAutoVerifiedByHuman === true,
         stmbAutoConfidence: overrides.stmbAutoConfidence,
+        // PHA-2693: mirrors auditorJobs.js `entriesForCoverage` carrying the
+        // mark through the projection. Without it every step reads "no record
+        // of a prior run" and silently degrades to a full rebuild.
+        stmbAutoRunHighWater: overrides.stmbAutoRunHighWater
+            ?? (idx >= 0 ? book[idx].stmbAutoRunHighWater : undefined),
     };
     if (idx >= 0) { book[idx] = next; return { created: false, updated: true }; }
     book.push(next);
@@ -252,30 +279,53 @@ export async function runOneShotStep({ book, auditMessages, transcriptText, gene
     const existing = book.map((e) => ({ ...e }));
     const lorePool = existing.filter((e) => !e.isMemory);
 
+    // PHA-2693 Build item 5, mirroring oneShotLorebook.js. `incremental: false`
+    // is the full-rebuild ground truth the report compares against.
+    const incremental = planIncrementalRun({
+        existing,
+        messages: auditMessages,
+        unresolvedQuestions: fullCfg.unresolvedQuestions,
+        enabled: fullCfg.incremental !== false,
+    });
+    const NO_PINNING = { toWrite: [], skipped: [], contradictions: [], newlyPinned: [], renamed: [] };
+    if (incremental.canSkipCall) {
+        return { ok: true, skippedCall: true, incremental, entries: [], collisions: [], writes: [], pinning: NO_PINNING };
+    }
+
     const prompt = buildOneShotPrompt({
         transcriptText,
-        existingText: formatExistingEntries(existing),
+        existingText: formatExistingEntries(existing, incremental.frozenTitles),
         maxEntries: fullCfg.maxEntries,
         template: fullCfg.prompt || ONE_SHOT_PROMPT,
     });
 
     const parsed = await generateOneShotEntries({ generate, prompt, cfg: fullCfg });
     if (!parsed) {
-        return { ok: false, message: 'the model returned no usable entry set', prompt };
+        return { ok: false, message: 'the model returned no usable entry set', prompt, incremental };
     }
 
-    const guarded = dropMemoryTitleCollisions(parsed.entries, existing);
+    const thawed = dropFrozenEntries(parsed.entries, incremental.frozenTitles);
+    if (!thawed.entries.length && thawed.skipped.length) {
+        // The model agreed with the run's own staleness call. A correct
+        // no-change incremental step, not a failure.
+        return { ok: true, prompt, parsed, incremental, thawed, entries: [], collisions: [], writes: [], pinning: NO_PINNING };
+    }
+
+    const guarded = dropMemoryTitleCollisions(thawed.entries, existing);
     if (!guarded.entries.length) {
-        return { ok: false, message: 'every generated entry collided with an existing scene memory', prompt, parsed, guarded };
+        return { ok: false, message: 'every generated entry collided with an existing scene memory', prompt, parsed, guarded, incremental };
     }
 
     const rewritten = new Set(guarded.entries.map((e) => e.title.trim().toLowerCase()));
     const claimedByExisting = collectClaimedKeywords(lorePool, rewritten);
     for (const k of collectClaimedKeywords(existing.filter((e) => e.isMemory))) claimedByExisting.add(k);
 
-    const { entries, collisions } = enforceGlobalKeywordUniqueness(guarded.entries, claimedByExisting);
+    // PHA-2693 Build item 6.
+    const priorAwards = collectPriorAwards(existing);
+    const { entries, collisions } = enforceGlobalKeywordUniqueness(guarded.entries, claimedByExisting, priorAwards);
     const pinning = applyProvenancePinning(entries, existing);
 
+    const runHighWater = transcriptHighWater(auditMessages);
     const writes = [];
     for (const entry of pinning.toWrite) {
         // PHA-2722: `stmbAutoConfidence` is the only provenance-derived property
@@ -289,6 +339,7 @@ export async function runOneShotStep({ book, auditMessages, transcriptText, gene
             stmbAutoContentHash: hashContent(entry.content),
             stmbAutoConfidence: confidence,
             stmbAutoVerifiedByHuman: false,
+            stmbAutoRunHighWater: runHighWater,
         };
         const res = upsertByTitle(book, entry.title, entry.content, overrides);
         writes.push({ title: entry.title, confidence, ...res });
@@ -308,7 +359,7 @@ export async function runOneShotStep({ book, auditMessages, transcriptText, gene
         });
     }
 
-    return { ok: true, prompt, parsed, guarded, entries, collisions, pinning, writes };
+    return { ok: true, prompt, parsed, guarded, thawed, incremental, entries, collisions, pinning, writes };
 }
 
 // ----------------------------------------------------------------------------
@@ -471,24 +522,50 @@ export function checkHumanPinSurvives({ pinning, pinnedTitles, book, preStepCont
  * @param {{before:Array<{title:string, content:string}>,
  *          after:Array<{title:string, content:string}>, prevBoundary:number}} p
  */
-export function checkDrift({ before, after, prevBoundary } = {}) {
+export function checkDrift({ before, after, prevBoundary, frozenTitles } = {}) {
     const beforeByTitle = new Map((before || []).map((e) => [e.title.trim().toLowerCase(), e]));
     const offenders = [];
     let checked = 0;
+    let unscoreable = 0;
+
+    // Two bases, and which one is in play matters when reading the result.
+    //
+    // `frozen-set` is the run's OWN answer to "whose source changed?", from
+    // planIncrementalRun (PHA-2693). It is the right basis whenever it exists.
+    //
+    // `source-ref` is the original PHA-2732 proxy — "this entry's citations end
+    // at or before the last slice boundary" — and it is only a proxy. An
+    // entry's citations say where its CURRENT content came from, not whether
+    // new material could legitimately extend it: an entry sourced at message 1
+    // that the story is still discussing at message 20 scores as
+    // source-unchanged, so every honest update to it reads as drift. Kept as
+    // the fallback because a full rebuild has no frozen set to use, and that is
+    // exactly the mode where real drift is expected to show up.
+    const useFrozen = frozenTitles instanceof Set && frozenTitles.size > 0;
+
     for (const e of (after || [])) {
         const key = e.title.trim().toLowerCase();
         const prior = beforeByTitle.get(key);
         if (!prior) continue; // new entry this step — nothing to compare
-        const ranges = extractProvenanceRanges(prior.content);
-        if (ranges.length === 0) continue; // no citation to reason about staleness from
-        const end = Math.max(...ranges.map((r) => r.end));
-        if (end > prevBoundary) continue; // source COULD have changed for this entry
+
+        if (useFrozen) {
+            if (!frozenTitles.has(key)) continue;
+        } else {
+            const ranges = extractProvenanceRanges(prior.content);
+            // Counted rather than silently dropped: an entry with no citation
+            // is a HOLE in this check's coverage, and a check that reports `ok`
+            // while quietly scoring nothing is worse than one that fails.
+            if (ranges.length === 0) { unscoreable++; continue; }
+            const end = Math.max(...ranges.map((r) => r.end));
+            if (end > prevBoundary) continue; // source COULD have changed
+        }
+
         checked++;
         if (e.content !== prior.content) {
-            offenders.push({ title: e.title, sourceRef: `${end}`, prevBoundary });
+            offenders.push({ title: e.title, prevBoundary });
         }
     }
-    return { ok: offenders.length === 0, offenders, checked };
+    return { ok: offenders.length === 0, offenders, checked, unscoreable, basis: useFrozen ? 'frozen-set' : 'source-ref' };
 }
 
 /** Run every non-N-slice-specific Tier 1 check and return a named map. */
@@ -613,6 +690,167 @@ export async function checkBoundaryPrecision({
 }
 
 // ----------------------------------------------------------------------------
+// PHA-2693 report dimensions
+// ----------------------------------------------------------------------------
+
+/**
+ * Idempotence: run the SAME step again against the SAME slice and assert the
+ * book does not move.
+ *
+ * Distinct from check 5 (`checkZeroWritesOnRerun`), which asks whether the
+ * pinning stage decided to write. This asks the stronger, end-to-end question:
+ * after a second full pass, is the book byte-identical? A step can legitimately
+ * "write" an entry whose content happens to match and still be idempotent; a
+ * step that re-words one entry is not, no matter what it reported.
+ *
+ * @param {{book:Array<object>, auditMessages:Array<object>, transcriptText:string,
+ *          generate:function, cfg?:object}} p
+ */
+export async function checkIdempotence({ book, auditMessages, transcriptText, generate, cfg = {} } = {}) {
+    const shape = (list) => JSON.stringify((list || []).map((e) => ({ title: e.title, content: e.content, keys: e.keys })));
+    const snapshot = shape(book);
+    const replay = book.map((e) => ({ ...e }));
+    const result = await runOneShotStep({ book: replay, auditMessages, transcriptText, generate, cfg });
+
+    const moved = [];
+    if (snapshot !== shape(replay)) {
+        const byTitle = new Map((book || []).map((e) => [e.title, e]));
+        for (const e of replay) {
+            const prior = byTitle.get(e.title);
+            if (!prior) { moved.push({ title: e.title, reason: 'appeared on the second pass' }); continue; }
+            if (prior.content !== e.content) moved.push({ title: e.title, reason: 'content changed' });
+            else if (JSON.stringify(prior.keys) !== JSON.stringify(e.keys)) moved.push({ title: e.title, reason: 'keywords changed' });
+        }
+    }
+    return {
+        ok: moved.length === 0,
+        moved,
+        skippedCall: result.skippedCall === true,
+        writes: result.writes ? result.writes.length : 0,
+    };
+}
+
+/**
+ * Correction durability: a hand-edit made at step K is still there, byte for
+ * byte, at step N — and any later source that contradicts it was REPORTED
+ * rather than applied.
+ *
+ * `pinnedAt` is the content the human left behind. Anything else in the book at
+ * the end is a failure regardless of how it got there, which is the point: this
+ * check does not care which mechanism was supposed to protect it.
+ *
+ * @param {{book:Array<object>, pinnedAt:Map<string,{content:string, step:number}>,
+ *          steps:Array<object>}} p
+ */
+export function checkCorrectionDurability({ book, pinnedAt, steps } = {}) {
+    const offenders = [];
+    const survived = [];
+    const contradictionsReported = [];
+
+    for (const [title, { content, step }] of (pinnedAt || new Map())) {
+        const key = title.trim().toLowerCase();
+        const now = (book || []).find((e) => e.title.trim().toLowerCase() === key);
+        if (!now) { offenders.push({ title, step, reason: 'the pinned entry is gone from the book' }); continue; }
+        if (now.content !== content) {
+            offenders.push({ title, step, reason: 'the human correction was overwritten' });
+            continue;
+        }
+        survived.push({ title, step, stepsSurvived: (steps || []).filter((s) => s.index > step).length });
+        for (const s of (steps || [])) {
+            for (const c of (s.result?.pinning?.contradictions || [])) {
+                if (c.title.trim().toLowerCase() === key) {
+                    contradictionsReported.push({ title, atStep: s.index, boundary: s.boundary });
+                }
+            }
+        }
+    }
+    return { ok: offenders.length === 0, offenders, survived, contradictionsReported };
+}
+
+/**
+ * Provenance spot-check: sample N entries and report what each one CLAIMS about
+ * where it came from — the `src: msgs X–Y` ranges the model wrote into its own
+ * content (PHA-2722's single provenance format), the messages those ranges
+ * actually name, and the entry-level `stated`/`inferred` ranking signal — so a
+ * human can go read those messages and say whether the claim holds.
+ *
+ * Deliberately not a pass/fail check. Whether a citation is *apt* is a
+ * judgement about prose, which is why the issue asks for a spot-check a person
+ * reads rather than an assertion. Sampling is deterministic (evenly spaced over
+ * the title-sorted book) so the same book always yields the same five entries
+ * to argue about.
+ *
+ * @param {{book:Array<object>, messages:Array<object>, sampleSize?:number}} p
+ */
+export function provenanceSpotCheck({ book, messages, sampleSize = 5 } = {}) {
+    const live = (book || []).filter((e) => !e.disable).slice().sort((a, b) => a.title.localeCompare(b.title));
+    const n = Math.min(sampleSize, live.length);
+    const byId = new Map((messages || []).map((m) => [m.id, String(m.rawText ?? m.text ?? m.mes ?? '')]));
+
+    const samples = [];
+    for (let i = 0; i < n; i++) {
+        const e = live[Math.floor((i * live.length) / n)];
+        const ranges = extractProvenanceRanges(e.content);
+        const ids = [];
+        for (const r of ranges) for (let id = r.start; id <= r.end; id++) ids.push(id);
+        samples.push({
+            title: e.title,
+            // The entry-level ranking signal PHA-2722 kept as a property.
+            confidence: e.stmbAutoConfidence ?? '(none recorded)',
+            citedRanges: ranges.map((r) => `${r.start}-${r.end}`),
+            citedMessageCount: ids.length,
+            content: e.content,
+            // The actual message text, so the reader can judge the citation
+            // without going back to the transcript by hand.
+            cited: ids.slice(0, 12).map((id) => ({ id, text: (byId.get(id) || '').slice(0, 400) })),
+        });
+    }
+
+    const live2 = (book || []).filter((e) => !e.disable);
+    return {
+        sampleSize: n,
+        samples,
+        bookTotals: {
+            entries: live2.length,
+            stated: live2.filter((e) => e.stmbAutoConfidence === 'stated').length,
+            inferred: live2.filter((e) => e.stmbAutoConfidence === 'inferred').length,
+            noConfidence: live2.filter((e) => e.stmbAutoConfidence == null).length,
+            uncited: live2.filter((e) => extractProvenanceRanges(e.content).length === 0).length,
+        },
+    };
+}
+
+/**
+ * Cost, reported honestly.
+ *
+ * The issue is explicit that token savings must not be led with, and the reason
+ * is structural: under one-shot generation the whole transcript is in the prompt
+ * on EVERY step regardless, so incremental cannot meaningfully move input
+ * tokens. It moves output tokens (fewer entries emitted) and write calls. Input
+ * and output are therefore reported separately and never summed into a single
+ * headline number, because a summed number would hide exactly that.
+ *
+ * @param {{incremental:{calls:number, inputTokens:number, outputTokens:number, writes:number},
+ *          full:{calls:number, inputTokens:number, outputTokens:number, writes:number}}} p
+ */
+export function compareCost({ incremental, full } = {}) {
+    const pct = (a, b) => (b === 0 ? null : Math.round(((b - a) / b) * 1000) / 10);
+    return {
+        incremental,
+        full,
+        delta: {
+            inputTokensSavedPct: pct(incremental.inputTokens, full.inputTokens),
+            outputTokensSavedPct: pct(incremental.outputTokens, full.outputTokens),
+            writesSavedPct: pct(incremental.writes, full.writes),
+            calls: { incremental: incremental.calls, full: full.calls },
+        },
+        // Stated in the artifact itself so a reader who only skims the numbers
+        // still gets the caveat.
+        caveat: 'Input tokens are the whole transcript on every step in both modes, so an input-side saving here would be noise, not a result. Output tokens and write calls are where incremental actually differs. Token counts are char/4 estimates, not billed usage.',
+    };
+}
+
+// ----------------------------------------------------------------------------
 // N-slice replay
 // ----------------------------------------------------------------------------
 
@@ -627,37 +865,83 @@ export async function checkBoundaryPrecision({
  *          generate:function, cfg?:object, onStep?:function}} p
  * @returns {Promise<{steps:Array<object>, book:Array<object>}>}
  */
-export async function replayNSlices({ book: initialBook = [], auditMessages, boundaries, generate, cfg = {}, onStep } = {}) {
+export async function replayNSlices({
+    book: initialBook = [], auditMessages, boundaries, generate, cfg = {}, onStep,
+    handEdits = new Map(), checkIdempotenceEveryStep = false,
+} = {}) {
     const book = initialBook.map((e) => ({ ...e }));
     const steps = [];
+    const cost = { calls: 0, inputTokens: 0, outputTokens: 0, writes: 0 };
+    const tracked = withCostTracking(generate, cost);
+    const pinnedAt = new Map();
     let prevBoundary = 0;
+    let index = 0;
 
     for (const boundary of boundaries) {
+        // A hand-edit "at step K" happens BEFORE step K runs — that is what a
+        // human correcting the book between sessions looks like. The entry is
+        // left with a content hash that no longer matches, which is the only
+        // signal `wasHumanEdited` has to work from.
+        for (const { title, content } of (handEdits.get(index) || [])) {
+            const target = book.find((e) => e.title.trim().toLowerCase() === title.trim().toLowerCase());
+            if (!target) continue;
+            target.content = content;              // hash deliberately left stale
+            pinnedAt.set(target.title, { content, step: index });
+        }
+
         const slice = (auditMessages || []).filter((m) => m.id < boundary);
         const transcriptText = formatTranscript(slice, cfg.truncate);
 
         const before = book.map((e) => ({ title: e.title, content: e.content }));
-        const result = await runOneShotStep({ book, auditMessages: slice, transcriptText, generate, cfg });
+        const stepCost = { calls: 0, inputTokens: 0, outputTokens: 0 };
+        const stepTracked = withCostTracking(tracked, stepCost);
+        const result = await runOneShotStep({ book, auditMessages: slice, transcriptText, generate: stepTracked, cfg });
         const after = book.map((e) => ({ title: e.title, content: e.content }));
 
+        // The human's content IS the new baseline once the run latches the pin,
+        // so track what it became rather than what it was stamped as.
+        for (const [title, rec] of pinnedAt) {
+            const now = book.find((e) => e.title.trim().toLowerCase() === title.trim().toLowerCase());
+            if (now && now.stmbAutoVerifiedByHuman === true) rec.content = now.content;
+        }
+
         const tier1 = runTier1Checks({ book, messages: slice, idMin: 0, idMax: boundary - 1, cfg });
-        const drift = checkDrift({ before, after, prevBoundary });
+        const drift = checkDrift({ before, after, prevBoundary, frozenTitles: result.incremental?.frozenTitles });
+        const zeroWrites = checkZeroWritesOnRerun(result.pinning);
+        const writes = result.writes ? result.writes.length : 0;
+        cost.writes += writes;
+
+        const idempotence = checkIdempotenceEveryStep
+            ? await checkIdempotence({ book, auditMessages: slice, transcriptText, generate, cfg })
+            : null;
 
         const step = {
+            index,
             boundary,
             messageCount: slice.length,
             totalEntries: book.length,
-            regenerated: result.writes ? result.writes.length : 0,
+            // "regenerated vs total", the issue's own per-step metric.
+            regenerated: writes,
+            frozen: result.incremental?.frozen.length ?? 0,
+            stale: result.incremental?.stale.length ?? 0,
+            mode: result.incremental?.mode ?? 'full',
+            skippedCall: result.skippedCall === true,
+            cost: stepCost,
             result,
             tier1,
             drift,
+            zeroWrites,
+            idempotence,
         };
         steps.push(step);
         prevBoundary = boundary;
+        index++;
         if (typeof onStep === 'function') onStep(step);
     }
 
-    return { steps, book };
+    const durability = pinnedAt.size ? checkCorrectionDurability({ book, pinnedAt, steps }) : null;
+
+    return { steps, book, cost, durability, pinnedAt };
 }
 
 /**

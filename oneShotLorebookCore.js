@@ -110,6 +110,9 @@ RULES
    entries, listed below. Treat those as taken.
 5. Do not write entries about the user's own persona's private thoughts, and do
    not summarize the plot beat by beat — that is what memory entries are for.
+6. Entries tagged [settled — do not re-emit] are already correct for the story
+   so far. Leave them OUT of your reply entirely — do not restate them, do not
+   improve their wording. Their keywords stay taken by them.
 
 ${ERROR_CONTROL_RULES}
 
@@ -137,9 +140,19 @@ export function formatTranscript(messages, truncate = ONE_SHOT_DEFAULTS.truncate
 /**
  * Render the existing lorebook as "title — keywords" lines, so the model can
  * both update by title and avoid keywords that are already taken.
+ *
+ * `frozenTitles` (PHA-2693) marks the entries an incremental run has decided
+ * are settled. They are still LISTED — the model needs to see them so it does
+ * not create a second entry for the same subject or steal their keywords — but
+ * tagged so it knows not to spend output tokens re-emitting them. The tag rides
+ * the same channel as the existing `[scene memory — do not rewrite]` marker
+ * rather than a new prompt token, so a user's custom prompt template keeps
+ * working unchanged.
+ *
  * @param {Array<{title:string, keys:string[], isMemory?:boolean}>} entries
+ * @param {Set<string>} [frozenTitles] normalized titles this run will not re-derive
  */
-export function formatExistingEntries(entries) {
+export function formatExistingEntries(entries, frozenTitles = new Set()) {
     const list = Array.isArray(entries) ? entries : [];
     const lines = [];
     for (const e of list) {
@@ -148,7 +161,9 @@ export function formatExistingEntries(entries) {
         const keys = (Array.isArray(e?.keys) ? e.keys : [])
             .map(k => String(k ?? '').trim())
             .filter(Boolean);
-        const tag = e?.isMemory ? ' [scene memory — do not rewrite]' : '';
+        const tag = e?.isMemory
+            ? ' [scene memory — do not rewrite]'
+            : (frozenTitles.has(title.toLowerCase()) ? ' [settled — do not re-emit]' : '');
         lines.push(`- ${title}${tag}: ${keys.length ? keys.join(', ') : '(no keywords)'}`);
     }
     return lines.length ? lines.join('\n') : '(empty — this is a brand new lorebook)';
@@ -379,11 +394,52 @@ export function collectClaimedKeywords(entries, skipTitles = new Set()) {
 }
 
 /**
+ * The keyword awards this book already reflects (PHA-2693 Build item 6).
+ *
+ * `enforceGlobalKeywordUniqueness` used to re-derive every award from scratch
+ * on every run, which is not the same thing as remembering them. A title the
+ * run is rewriting releases its keywords back into the pool (oneShotLorebook.js
+ * builds `claimedByExisting` with those titles skipped, deliberately — the run
+ * is about to restate them). While they are loose, a NEWCOMER whose title
+ * happens to contain the keyword can take it under rule 2, and the stable
+ * entity that has owned it for ten runs loses it. Retrieval for that entity
+ * silently changes even though nothing about it did.
+ *
+ * This is the known state that stops that: keyword -> the normalized title that
+ * currently holds it, read off the shipped book once, and consulted FIRST when
+ * a contest happens. It is an incumbency rule, not a veto — the incumbent only
+ * wins a keyword it is still asking for.
+ *
+ * @param {Array<{title:string, keys?:string[], key?:string[], disable?:boolean}>} entries
+ * @returns {Map<string,string>} normalized keyword -> normalized owning title
+ */
+export function collectPriorAwards(entries) {
+    const awards = new Map();
+    for (const e of (Array.isArray(entries) ? entries : [])) {
+        if (e?.disable) continue;
+        const title = normalizeKeyword(e?.title);
+        if (!title) continue;
+        const keys = Array.isArray(e?.keys) ? e.keys : (Array.isArray(e?.key) ? e.key : []);
+        for (const k of keys) {
+            if (isRegexKey(k)) continue;
+            const n = normalizeKeyword(k);
+            // First writer wins: a book that somehow ships the same keyword on
+            // two entries is exactly the state this whole function guards
+            // against, so do not let the later one rewrite history.
+            if (n && !awards.has(n)) awards.set(n, title);
+        }
+    }
+    return awards;
+}
+
+/**
  * Make global keyword uniqueness a guarantee rather than an instruction.
  *
  * A keyword claimed by more than one generated entry is awarded to exactly one
  * of them and stripped from the others. The winner is chosen deterministically,
  * most specific first:
+ *   0. the entry that already held this keyword in the shipped book, if it is
+ *      still asking for it (PHA-2693 — see `collectPriorAwards`), else
  *   1. the entry whose own title IS the keyword (exact match), else
  *   2. the entry whose title CONTAINS the keyword as a whole word, else
  *   3. the entry that emitted it first.
@@ -397,9 +453,11 @@ export function collectClaimedKeywords(entries, skipTitles = new Set()) {
  *
  * @param {Array<object>} entries parsed entries (mutated copies are returned)
  * @param {Set<string>} claimedByExisting normalized keywords owned by the book
- * @returns {{entries:Array<object>, collisions:Array<{keyword:string, winner:string, strippedFrom:string[]}>}}
+ * @param {Map<string,string>} [priorAwards] `collectPriorAwards` output; omitted
+ *        means "no memory", i.e. exactly the pre-PHA-2693 behaviour
+ * @returns {{entries:Array<object>, collisions:Array<{keyword:string, winner:string, strippedFrom:string[], reason:string}>}}
  */
-export function enforceGlobalKeywordUniqueness(entries, claimedByExisting = new Set()) {
+export function enforceGlobalKeywordUniqueness(entries, claimedByExisting = new Set(), priorAwards = new Map()) {
     const list = (Array.isArray(entries) ? entries : []).map(e => ({ ...e }));
 
     // Who wants what.
@@ -427,20 +485,30 @@ export function enforceGlobalKeywordUniqueness(entries, claimedByExisting = new 
                     keyword,
                     winner: '(existing lorebook entry)',
                     strippedFrom: group.map(g => list[g.idx].title),
+                    reason: 'claimed by an untouched existing entry',
                 });
             }
             continue;
         }
         if (group.length === 1) { awarded.set(keyword, group[0].idx); continue; }
 
+        const incumbentTitle = priorAwards.get(keyword);
+        const incumbent = incumbentTitle
+            ? group.find(g => normalizeKeyword(list[g.idx].title) === incumbentTitle)
+            : undefined;
         const exact = group.find(g => normalizeKeyword(list[g.idx].title) === keyword);
         const contained = group.find(g => wholeWord(normalizeKeyword(list[g.idx].title), keyword));
-        const winner = exact || contained || group[0];
+        const winner = incumbent || exact || contained || group[0];
+        const reason = incumbent ? 'prior award (incumbent)'
+            : exact ? 'title is the keyword'
+            : contained ? 'title contains the keyword'
+            : 'emitted first';
         awarded.set(keyword, winner.idx);
         collisions.push({
             keyword,
             winner: list[winner.idx].title,
             strippedFrom: group.filter(g => g.idx !== winner.idx).map(g => list[g.idx].title),
+            reason,
         });
     }
 
@@ -765,6 +833,220 @@ export function applyProvenancePinning(generated, existing) {
     return { toWrite, skipped, contradictions, newlyPinned, renamed };
 }
 
+// ---------------------------------------------------------------- incremental runs (PHA-2693)
+
+/**
+ * Every name an entry answers to: its title plus its keywords, normalized.
+ * Used to ask "does this new message talk about this entry at all?".
+ */
+export function entryNames(entry) {
+    const names = new Set();
+    const push = (s) => { const n = normalizeKeyword(s); if (n) names.add(n); };
+    push(entry?.title);
+    const keys = Array.isArray(entry?.keys) ? entry.keys : (Array.isArray(entry?.key) ? entry.key : []);
+    for (const k of keys) { if (!isRegexKey(k)) push(k); }
+    return names;
+}
+
+/**
+ * How far into the story the run that last wrote this entry had actually read.
+ *
+ * Stamped PER ENTRY rather than once per run, and that is the load-bearing
+ * detail: with a single book-wide mark, an entry written at message 100 and an
+ * entry written at message 200 share one number, so a message at 150 naming the
+ * first entry is never diffed against it and the entry silently goes stale
+ * forever. Per entry, "have I read anything about you since I wrote you?" is
+ * always answerable.
+ */
+export function entryHighWater(entry) {
+    const n = Number(entry?.stmbAutoRunHighWater);
+    return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * The newest point in the story any run of this tool has read, across the whole
+ * book. Only used to decide whether there is anything NEW at all — per-entry
+ * staleness uses each entry's own mark.
+ */
+export function readHighWaterMark(existing) {
+    let hw = null;
+    for (const e of (Array.isArray(existing) ? existing : [])) {
+        const n = entryHighWater(e);
+        if (n !== null && (hw === null || n > hw)) hw = n;
+    }
+    return hw;
+}
+
+/** Does any of these names appear as a whole word in this text? */
+function textNames(text, names) {
+    const hay = normalizeKeyword(text);
+    if (!hay) return false;
+    for (const n of names) if (containsWholeWord(hay, n)) return true;
+    return false;
+}
+
+/**
+ * Decide which existing entries this run actually has to re-derive (Build item 5).
+ *
+ * The diff is against each entry's own high-water mark: an entry is stale when
+ * the story has said something about it that the run which wrote it never saw,
+ * or when an unresolved question is still open against it. Everything else is
+ * FROZEN — listed to the model so it neither duplicates the subject nor steals
+ * its keywords, but explicitly not asked for.
+ *
+ * HONEST ACCOUNTING, because this is the thing the issue warns about: under
+ * one-shot generation the whole transcript goes into the prompt either way, so
+ * this saves close to nothing on INPUT tokens. What it saves is OUTPUT tokens
+ * (the model writes 4 entries instead of 52) and write calls (the run touches
+ * 4 entries instead of 52). The reason to want it is not cost — it is that an
+ * entry nobody asked the model to rewrite cannot come back re-worded, which is
+ * the drift guarantee `applyProvenancePinning` explicitly could not make on its
+ * own (see its docstring).
+ *
+ * Failure direction is deliberate: when in doubt, regenerate. An entry with no
+ * provenance, a book with no marks at all, a message that might be about the
+ * entry — all resolve to "stale". A false stale costs output tokens; a false
+ * frozen means an entry never gets updated again, which is silent and wrong.
+ *
+ * @param {object} p
+ * @param {Array<object>} p.existing         entriesForCoverage() output
+ * @param {Array<{id?:number, index?:number, rawText?:string, text?:string, mes?:string}>} p.messages
+ * @param {Array<string|{question?:string, text?:string}>} [p.unresolvedQuestions]
+ * @param {boolean} [p.enabled] false forces the full-rebuild ground truth
+ * @returns {{mode:'full'|'incremental', reason:string, highWater:number|null,
+ *            newMessageCount:number, canSkipCall:boolean,
+ *            frozen:Array<{title:string, reason:string}>,
+ *            stale:Array<{title:string, reason:string}>,
+ *            frozenTitles:Set<string>}}
+ */
+export function planIncrementalRun({ existing = [], messages = [], unresolvedQuestions = [], enabled = true } = {}) {
+    const lore = (Array.isArray(existing) ? existing : []).filter(e => e && !e.isMemory && !e.disable);
+    const msgs = (Array.isArray(messages) ? messages : [])
+        .map(m => ({ id: Number(m?.id ?? m?.index), text: String(m?.rawText ?? m?.text ?? m?.mes ?? '') }))
+        .filter(m => Number.isFinite(m.id));
+    const highWater = readHighWaterMark(lore);
+    const newMessageCount = highWater === null ? msgs.length : msgs.filter(m => m.id > highWater).length;
+
+    const full = (reason) => ({
+        mode: 'full', reason, highWater, newMessageCount, canSkipCall: false,
+        frozen: [], stale: lore.map(e => ({ title: e.title, reason })), frozenTitles: new Set(),
+    });
+
+    if (!enabled) return full('incremental runs are off — full rebuild');
+    if (!lore.length) return full('nothing in the book yet — full rebuild');
+    if (highWater === null) {
+        return full('no entry in this book records what the last run had read — full rebuild');
+    }
+
+    // The ledger shape is chunkedLorebookCore.js's `{question, about, messageIds,
+    // resolved}`; a bare string is accepted too. `about` names the entity the
+    // question is against, so it is the precise field — but questions routinely
+    // name a second entity only in their prose, so both are matched. Already-
+    // resolved entries are not open and must not hold anything stale.
+    const questions = (Array.isArray(unresolvedQuestions) ? unresolvedQuestions : [])
+        .filter(q => typeof q === 'string' || !q?.resolved)
+        .map(q => normalizeKeyword(typeof q === 'string' ? q : `${q?.about ?? ''} ${q?.question ?? q?.text ?? ''}`))
+        .filter(Boolean);
+
+    const frozen = [];
+    const stale = [];
+    const frozenTitles = new Set();
+
+    for (const e of lore) {
+        const title = String(e?.title ?? '').trim();
+        if (!title) continue;
+        const mark = entryHighWater(e);
+        if (mark === null) {
+            stale.push({ title, reason: 'no record of what the run that wrote it had read' });
+            continue;
+        }
+        const names = entryNames(e);
+        if (!names.size) {
+            stale.push({ title, reason: 'no title or keywords to match the story against' });
+            continue;
+        }
+
+        const askedAbout = questions.find(q => textNames(q, names));
+        if (askedAbout) {
+            stale.push({ title, reason: 'named by a still-open unresolved question' });
+            continue;
+        }
+
+        const sinceIds = [];
+        for (const m of msgs) {
+            if (m.id <= mark) continue;
+            if (textNames(m.text, names)) sinceIds.push(m.id);
+        }
+        if (sinceIds.length) {
+            stale.push({
+                title,
+                reason: `named in ${sinceIds.length} message${sinceIds.length === 1 ? '' : 's'} added since it was written (${sinceIds[0]}–${sinceIds[sinceIds.length - 1]})`,
+            });
+            continue;
+        }
+
+        frozen.push({ title, reason: `nothing since message ${mark} mentions it` });
+        frozenTitles.add(title.toLowerCase());
+    }
+
+    // Nothing new to read AND nothing outstanding: the honest answer is that
+    // there is no work, and the caller should not spend a call to be told so.
+    const canSkipCall = newMessageCount === 0 && stale.length === 0;
+
+    return {
+        mode: 'incremental',
+        reason: canSkipCall
+            ? `nothing new since message ${highWater} and no entry is stale`
+            : `${stale.length} of ${lore.length} entr${lore.length === 1 ? 'y' : 'ies'} need re-deriving, ${frozen.length} settled`,
+        highWater,
+        newMessageCount,
+        canSkipCall,
+        frozen,
+        stale,
+        frozenTitles,
+    };
+}
+
+/**
+ * Drop generated entries the run had frozen.
+ *
+ * Rule 6 of the prompt tells the model not to re-emit a settled entry; this
+ * makes it true regardless — same "instructions are not guarantees" reasoning
+ * as `dropMemoryTitleCollisions` and `enforceGlobalKeywordUniqueness`, and it
+ * is also what keeps a user's CUSTOM prompt template (which will not carry
+ * rule 6) from quietly losing the drift guarantee.
+ *
+ * Safe because frozen means "no new source names this subject": there is no
+ * fresh material for the dropped entry to have contained, so nothing is lost
+ * and no contradiction goes unreported.
+ *
+ * @param {Array<object>} entries
+ * @param {Set<string>} frozenTitles normalized titles
+ * @returns {{entries:Array<object>, skipped:string[]}}
+ */
+export function dropFrozenEntries(entries, frozenTitles = new Set()) {
+    const list = Array.isArray(entries) ? entries : [];
+    if (!frozenTitles.size) return { entries: list, skipped: [] };
+    const kept = [];
+    const skipped = [];
+    for (const entry of list) {
+        const t = String(entry?.title ?? '').trim().toLowerCase();
+        if (t && frozenTitles.has(t)) skipped.push(String(entry?.title ?? ''));
+        else kept.push(entry);
+    }
+    return { entries: kept, skipped };
+}
+
+/** The newest message id in this run's transcript — the mark to stamp on writes. */
+export function transcriptHighWater(messages) {
+    let hw = null;
+    for (const m of (Array.isArray(messages) ? messages : [])) {
+        const n = Number(m?.id ?? m?.index);
+        if (Number.isFinite(n) && (hw === null || n > hw)) hw = n;
+    }
+    return hw;
+}
+
 // ---------------------------------------------------------------- the call
 
 /**
@@ -796,9 +1078,10 @@ export async function generateOneShotEntries({ generate, prompt, cfg = {} }) {
  */
 export function summarizeOneShot({
     created = 0, updated = 0, dropped = 0, collisions = [], keywordless = 0,
-    skipped = [], contradictions = [], inferred = 0, renamed = [],
+    skipped = [], contradictions = [], inferred = 0, renamed = [], frozen = 0,
 } = {}) {
     const parts = [`one-shot lorebook: ${created} created, ${updated} updated`];
+    if (frozen) parts.push(`${frozen} settled entr${frozen === 1 ? 'y' : 'ies'} left alone (incremental)`);
     if (skipped.length) parts.push(`${skipped.length} entr${skipped.length === 1 ? 'y' : 'ies'} unchanged, skipped`);
     if (contradictions.length) parts.push(`${contradictions.length} human-verified entr${contradictions.length === 1 ? 'y' : 'ies'} contradicted by new source (kept, reported)`);
     if (renamed.length) parts.push(`${renamed.length} rename${renamed.length === 1 ? '' : 's'} of a pinned entry ignored (kept the human-verified title)`);

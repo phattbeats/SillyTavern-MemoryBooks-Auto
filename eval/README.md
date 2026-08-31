@@ -116,6 +116,24 @@ node eval/score.js --predictions eval/out/predictions.json --labels eval/out/lab
 deduplicated prediction list, so failed or odd windows can be audited without
 rerunning.
 
+## PHA-2693 — N-slice replay of incremental re-runs
+
+```sh
+node eval/runIncrementalReplay.js     # → eval/reports/incrementalReplay/report.json
+```
+
+Offline, deterministic, no fixtures required — it ships with a small synthetic
+story (`fixtures/incrementalReplay-synthetic.json`) so the replay is
+reproducible without the local-only material. Reports drift, correction
+durability, idempotence, regenerated-vs-total per step, a 5-entry provenance
+spot-check, and cost with input and output kept apart.
+
+Written up in `reports/incrementalReplay/evidence.md`, including the two things
+it deliberately does **not** claim: Tier 2 coverage is reported as not-run
+(it needs the removed 52-entry reference book), and the output-token saving is
+bracketed rather than measured (a canned reply set cannot demonstrate prompt
+compliance).
+
 ## Notes / caveats
 
 - The shim ignores temperature/maxTokens (the CLI doesn't expose them), so

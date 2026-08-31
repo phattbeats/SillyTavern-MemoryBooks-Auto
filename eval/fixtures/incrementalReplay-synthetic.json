@@ -1,0 +1,46 @@
+{
+  "_note": "PHA-2693 N-slice replay fixture. SYNTHETIC and committed on purpose: the Magisa fixtures this issue names were removed from the repo by 2e5b3fc for privacy, so the replay needed something reproducible that ships. Twelve invented messages, no personal material. Message ids are 1-BASED because that is what extractProvenanceRanges accepts (auditorTechnicalPass.js: start >= 1), and entry content carries real `src: msgs N-M` citations in PHA-2722's single provenance format so the provenance checks score something instead of passing vacuously. `replies` is keyed by the highest message id in the slice, so a step that legitimately skips its call never desynchronises the script.",
+  "messages": [
+    { "id": 1, "speaker": "Narrator", "rawText": "Grondulf the landlord frowned at the ledger and mentioned the unpaid rent again." },
+    { "id": 2, "speaker": "Narrator", "rawText": "Grondulf the landlord kept the ledger in a locked drawer behind the taproom bar." },
+    { "id": 3, "speaker": "Narrator", "rawText": "Pemberly the baker kneaded dough before dawn in a warm and floury kitchen." },
+    { "id": 4, "speaker": "Narrator", "rawText": "Pemberly the baker carried warm bread up the hill to the garrison gate at noon." },
+    { "id": 5, "speaker": "Narrator", "rawText": "The garrison sergeant paid Pemberly the baker in clipped copper and said nothing." },
+    { "id": 6, "speaker": "Narrator", "rawText": "The Emberfall Road ran north from the garrison gate through thin and rocky country." },
+    { "id": 7, "speaker": "Narrator", "rawText": "Carters on the Emberfall Road spoke of a toll nobody had agreed to pay." },
+    { "id": 8, "speaker": "Narrator", "rawText": "Pemberly the baker began sending bread north along the Emberfall Road as well." },
+    { "id": 9, "speaker": "Narrator", "rawText": "A stranger in a grey coat paid for a room upstairs in old silver coin." },
+    { "id": 10, "speaker": "Narrator", "rawText": "The stranger in the grey coat asked about the Emberfall Road toll and paid again." },
+    { "id": 11, "speaker": "Narrator", "rawText": "Pemberly the baker refused to send bread north while the toll stood unexplained." },
+    { "id": 12, "speaker": "Narrator", "rawText": "The stranger in the grey coat left before dawn and settled the room in old silver." }
+  ],
+  "boundaries": [3, 6, 9, 13],
+  "handEdits": {
+    "2": [
+      {
+        "title": "Pemberly",
+        "content": "Corrected by hand: Pemberly is the baker, and she owns the bakery outright rather than renting it from Grondulf. (src: msgs 3-5)"
+      }
+    ]
+  },
+  "replies": {
+    "2": [
+      { "name": "Grondulf", "keys": ["Grondulf", "landlord"], "content": "Grondulf the landlord frowned at the ledger and mentioned the unpaid rent again, and he kept that ledger in a locked drawer behind the taproom bar. (src: msgs 1-2)" }
+    ],
+    "5": [
+      { "name": "Grondulf", "keys": ["Grondulf", "landlord"], "content": "Grondulf, who holds the ledger, is the landlord, and rent is his recurring subject of complaint. (src: msgs 1-2)" },
+      { "name": "Pemberly", "keys": ["Pemberly", "baker"], "content": "Pemberly the baker kneaded dough before dawn in a warm and floury kitchen, and carried warm bread up the hill to the garrison gate at noon. (src: msgs 3-5)" }
+    ],
+    "8": [
+      { "name": "Grondulf", "keys": ["Grondulf", "landlord"], "content": "Grondulf keeps a ledger and is the landlord of the building, forever raising the matter of rent. (src: msgs 1-2)" },
+      { "name": "Pemberly", "keys": ["Pemberly", "baker"], "content": "Pemberly the baker carried warm bread up the hill to the garrison gate at noon, and began sending bread north along the Emberfall Road as well. (src: msgs 3-8)" },
+      { "name": "Emberfall Road", "keys": ["Emberfall Road", "the toll"], "content": "The Emberfall Road ran north from the garrison gate through thin and rocky country, and carters on it spoke of a toll nobody had agreed to pay. (src: msgs 6-7)" }
+    ],
+    "12": [
+      { "name": "Grondulf", "keys": ["Grondulf", "landlord"], "content": "Grondulf the landlord, ledger in hand, is chiefly notable for how often he raises the subject of rent. (src: msgs 1-2)" },
+      { "name": "Pemberly", "keys": ["Pemberly", "baker"], "content": "Pemberly the baker refused to send bread north along the Emberfall Road while the toll stood unexplained. (src: msgs 11-11)" },
+      { "name": "Emberfall Road", "keys": ["Emberfall Road", "the toll"], "content": "The Emberfall Road ran north from the garrison gate through thin and rocky country, and carters on it spoke of a toll nobody had agreed to pay. (src: msgs 6-7)" },
+      { "name": "Stranger in a Grey Coat", "keys": ["grey coat", "old silver"], "content": "A stranger in a grey coat paid for a room upstairs in old silver coin, asked about the Emberfall Road toll, and left before dawn. (src: msgs 9-12)" }
+    ]
+  }
+}
