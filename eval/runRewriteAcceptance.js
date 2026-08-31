@@ -61,11 +61,13 @@ function parseArgs(argv) {
         recapture: false,
         model: process.env.STMB_EVAL_MODEL || 'claude-haiku-4-5-20251001',
         slices: null, // comma-separated message counts; default derived from DEFAULT_SLICE_FRACTIONS
+        requireFixtures: false,
         help: false,
     };
     for (let i = 2; i < argv.length; i++) {
         const a = argv[i];
         if (a === '--json') args.json = true;
+        else if (a === '--require-fixtures') args.requireFixtures = true;
         else if (a === '--live') args.live = true;
         else if (a === '--recapture') args.recapture = true;
         else if (a === '--transcript') args.transcript = argv[++i];
@@ -93,6 +95,8 @@ Usage: node eval/runRewriteAcceptance.js [options]
   --recapture               with --live, overwrite the canned replies fixture with this run's real output
   --model <name>            model id for --live      (default: claude-haiku-4-5-20251001)
   --out <dir>               evidence output dir     (default: eval/reports/rewriteAcceptance)
+  --require-fixtures        exit 1 instead of 0 when the local-only fixtures are absent, so a
+                            gate that is meant to actually run cannot pass by having nothing to do
   --json                    emit the machine-readable result only
   -h, --help                this message
 `);
@@ -157,16 +161,32 @@ async function main() {
     // local-only (untracked — see .gitignore). Without them there is nothing
     // to replay: record a skipped report so CI's upload step still has a
     // file, and exit green rather than failing on a fixture we no longer ship.
+    //
+    // That green is a "nothing ran" green, not a "checks passed" green, and the
+    // two are indistinguishable to anyone reading a CI badge. Whoever is
+    // relying on this harness as a gate — the PHA-2729 rewrite above all —
+    // passes `--require-fixtures` so an absent fixture is a hard failure
+    // instead of a silent pass. The default stays permissive so the privacy
+    // decision (fixtures are personal chat logs, not distributable) does not
+    // turn every unrelated PR red.
     const { existsSync } = await import('node:fs');
     const needed = [args.transcript, args.referenceBook, ...(args.live ? [] : [args.canned])];
     const missing = needed.filter((p) => !existsSync(p));
     if (missing.length) {
         await mkdir(args.out, { recursive: true });
-        const report = { skipped: true, reason: 'local-only eval fixtures not present', missing };
+        const report = {
+            skipped: true,
+            reason: 'local-only eval fixtures not present',
+            missing,
+            ...(args.requireFixtures ? { required: true } : {}),
+        };
         await writeFile(resolve(args.out, 'report.json'), `${JSON.stringify(report, null, 2)}\n`);
         log(`SKIPPED: local-only eval fixtures not present:\n  ${missing.join('\n  ')}`);
+        if (args.requireFixtures) {
+            log('--require-fixtures was set: a harness with nothing to check does not pass.');
+        }
         if (args.json) console.log(JSON.stringify(report));
-        process.exit(0);
+        process.exit(args.requireFixtures ? 1 : 0);
     }
 
     log('PHA-2732 rewrite acceptance harness');
