@@ -17,6 +17,41 @@ Fork home: https://github.com/phattbeats/SillyTavern-MemoryBooks-Auto.
 > contents and is preserved for audit purposes.
 
 
+## Unreleased — PHA-2737: drop hardcoded 'button' common-word stopword
+
+The auditor technical pass no longer ships `'button'` in
+`DEFAULT_COMMON_WORDS`. A real-story proper noun that collides with a common
+word belongs on its lorebook entry's `caseSensitive: true` (SillyTavern-native
+per-entry flag), not in this global default — the §4.3 fixture's Button
+Firewood entry already uses that flag.
+
+- **Default list pruned.** `auditorTechnicalPass.js` `DEFAULT_COMMON_WORDS` no
+  longer includes `'button'`. Comment + suggestion text updated to reference a
+  different common noun (`'lamp'`) as the planted-keyword example, and to
+  point users at `caseSensitive: true` for proper-noun collisions.
+- **Planted keyword moved to `PHASE5_DEFAULTS.plantedKeyword`** in
+  `eval/phase5Acceptance.js`, now `'lamp'`. The eval harness supplies it via
+  `settings.moduleSettings.autoModule.technicalPassCommonWords` so the
+  `keyword-common-only` check still fires for the planted entry. The
+  `runAuditWalk` driver now threads `deps.settings` through to
+  `runTechnicalPass` (PHA-2737 lock-down).
+- **Tests updated.** The 5 `'button'` test sites in
+  `auditorTechnicalPass.test.js` now use `'lamp'` and supply the keyword via
+  the settings override. `eval/phase5Acceptance.test.js` adds a
+  negative-control test that asserts the planted entry is **not** flagged when
+  settings are not threaded — locking the new contract that the planted
+  keyword belongs in `PHASE5_DEFAULTS`, not the default list.
+- **Eval runner (`eval/runPhase5Acceptance.js`)** threads settings through to
+  all `runAuditWalk` invocations so criterion 4 (planted-keyword detection)
+  still passes.
+
+Verified: `node --test` → 1129/1129 (was 1129/1129 before this change).
+`node eval/runPhase5Acceptance.js --json` → 4/4 criteria pass.
+
+PHA-2722 finding 4. See also [PHA-2722](/PHA/issues/PHA-2722) (parent review)
+and [PHA-2737](/PHA/issues/PHA-2737) (this issue).
+
+
 ## v0.0.24 (2026-08-10) — release: PHA-1878 one-shot lorebook generation, ready to test
 
 Rollup test build for [PHA-1878](/PHA/issues/PHA-1878). No new feature work —

@@ -96,6 +96,14 @@ async function main() {
     }
     knownNames.add(PHASE5_DEFAULTS.deletedCharacter.name);
 
+    // PHA-2737: the planted common-noun keyword is supplied via the user
+    // override list so the keyword-common-only check still fires. The
+    // technical pass consults settings.technicalPassCommonWords (case-
+    // insensitive) in addition to the (now-shrunk) default list.
+    const walkSettings = {
+        moduleSettings: { autoModule: { technicalPassCommonWords: [PHASE5_DEFAULTS.plantedKeyword] } },
+    };
+
     const messages = extractAuditMessages(fx.chat);
     const chunks = planAuditChunks(messages, {
         chunkSize: PHASE5_DEFAULTS.chunkSize,
@@ -115,6 +123,7 @@ async function main() {
         chat: fx.chat,
         lorebookData: { entries },
         knownNames: Array.from(knownNames),
+        settings: walkSettings,
     });
 
     // --- Criterion 1: per-chunk token caps ----------------------------------
@@ -140,12 +149,14 @@ async function main() {
         lorebookData: { entries },
         knownNames: Array.from(knownNames),
         stopAfterChunk: args.reloadAfter,
+        settings: walkSettings,
     });
     const after = await runAuditWalk({
         chat: fx.chat,
         lorebookData: { entries },
         knownNames: Array.from(knownNames),
         checkpoint: before.finalCheckpoint,
+        settings: walkSettings,
     });
     const merged = mergeAuditRuns(before, after);
     const reloadDupes = findReloadDuplicates(merged.processedChunks);
@@ -191,7 +202,7 @@ async function main() {
         },
     };
 
-    // --- Criterion 4: technical pass catches planted "button" ---------------
+    // --- Criterion 4: technical pass catches planted "lamp" ---------------
     const tech = base.reports?.technical;
     const plantedIssue = (tech?.issues || []).find(
         (i) => Number(i.entryUid) === Number(plantedUid) && i.code === 'keyword-common-only'

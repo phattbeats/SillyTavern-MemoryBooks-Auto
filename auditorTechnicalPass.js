@@ -12,7 +12,7 @@
 //      confirm or flag. Contradictions are *reported*, never silently reconciled.
 //
 // Plan §6 Phase 5 acceptance: "technical pass catches a deliberately planted
-// keyword collision (e.g. keyword "button")."
+// keyword collision (e.g. keyword "lamp")."
 //
 // Both jobs are pure functions over a lorebook data object — no ST runtime,
 // no chat reads, no writes to chat_metadata. The fork's runtime (Phase 5 P5.1
@@ -67,10 +67,15 @@
  * disambiguation work) — the collision check fires only when an entry's
  * ONLY keyword (or all keywords) are common words.
  *
- * Keep this list small and obvious. Plan §6 acceptance calls out "button" as
- * the canonical example; we ship that and a handful of high-frequency
- * function words. The user can extend the list via settings
+ * Keep this list small and obvious. Plan §6 acceptance calls out a common
+ * noun (e.g. "lamp") as the canonical example; we ship a handful of
+ * high-frequency function words. The user can extend the list via settings
  * (extension_settings.STMemoryBooks.autoModule.technicalPassCommonWords).
+ *
+ * Note: a real-story proper noun that collides with a common word belongs on
+ * its lorebook entry's `caseSensitive: true` (SillyTavern-native per-entry
+ * flag), not in this default. See PHA-2737 for the precedent set by the
+ * Button Firewood entry in the §4.3 fixture.
  */
 import { buildRegenerationIndexes, getRegenerationEligibility } from './memoryRegeneration.js';
 
@@ -80,8 +85,6 @@ export const DEFAULT_COMMON_WORDS = Object.freeze([
     'is', 'it', 'its', 'of', 'on', 'or', 'she', 'that', 'the',
     'their', 'they', 'this', 'to', 'was', 'were', 'will', 'with',
     'you', 'your',
-    // Plan §6 acceptance example
-    'button',
 ]);
 
 /**
@@ -263,7 +266,9 @@ export function runTechnicalPass(lorebookData, opts = {}) {
                     code: 'keyword-common-only',
                     message: `Entry's keywords are all common English words: ${e.keys.map((k) => JSON.stringify(k)).join(', ')}.`,
                     suggestion: `Add a distinctive proper-noun / unique-noun keyword, or remove these and rely on ` +
-                        `entry-specific names. Plan §6 example: keyword "button" alone fires this.`,
+                        `entry-specific names. Plan §6 example: a single common-noun keyword (e.g. "lamp") alone fires this. ` +
+                        `If a real-story name collides with a common word, set \`caseSensitive: true\` on that entry ` +
+                        `(SillyTavern-native per-entry flag) instead of adding the common word to this default.`,
                 });
             }
         }
