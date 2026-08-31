@@ -36,8 +36,6 @@ import {
     formatTranscript,
     generateOneShotEntries,
     hashContent,
-    migrateProvenanceShape,
-    needsProvenanceMigration,
     summarizeOneShot,
 } from './oneShotLorebookCore.js';
 
@@ -145,25 +143,6 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
 
     const cfg = plan.cfg || {};
     const existing = entriesForCoverage(lorebook.data);
-
-    // One-time upgrade for entries written between the PHA-2681 merge and this
-    // fix: `stmbAutoSourceRef` moved from a collapsed "first-last" span string
-    // to the full id array (review finding 3). Content is untouched, so this
-    // cannot trip human-edit detection or pinning.
-    for (const e of existing) {
-        if (!needsProvenanceMigration(e)) continue;
-        const patch = migrateProvenanceShape(e);
-        try {
-            await upsertLorebookEntryByTitle(lorebook.name, lorebook.data, e.title, e.content, {
-                entryOverrides: patch,
-                refreshEditor: false,
-            });
-            Object.assign(e, patch);
-        } catch (err) {
-            console.warn(`${LOG}: could not migrate provenance shape on “${e.title}”`, err);
-        }
-    }
-
     const lorePool = existing.filter(e => !e.isMemory);
 
     const prompt = buildOneShotPrompt({
@@ -228,7 +207,7 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
     for (let i = 0; i < toWrite.length; i++) {
         const entry = toWrite[i];
         if (entry.keywordless) keywordless++;
-        const { confidence, sourceRef, facts } = attributeSources(entry.content, plan.messages);
+        const { confidence } = attributeSources(entry.content, plan.messages);
         if (confidence === 'inferred') inferred++;
         try {
             onProgress?.(`Writing “${entry.title}” (${i + 1}/${toWrite.length})…`);
@@ -256,15 +235,16 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
                         vectorized: true,
                         selective: entry.keysecondary.length > 0,
                         disable: false,
-                        // Provenance (PHA-2681): entry properties, zero prompt
-                        // tokens — travels with the file, can't desync.
-                        // `stmbAutoConfidence`/`stmbAutoSourceRef` are the
-                        // entry-level rollup; `stmbAutoFacts` carries the
-                        // per-sentence breakdown the issue actually asked for.
+                        // Provenance (PHA-2681/PHA-2722): the model attaches its
+                        // own `src: msgs X–Y` lines in `content` now (the one
+                        // format every writer + `runClaimReverification` share —
+                        // see ERROR_CONTROL_RULES in the prompt). `stmbAutoConfidence`
+                        // is the only provenance-derived entry property: a
+                        // zero-token, post-hoc rollup used purely as a ranking
+                        // signal (which entries to recheck first), not a second
+                        // record of the citations themselves.
                         stmbAutoContentHash: hashContent(entry.content),
                         stmbAutoConfidence: confidence,
-                        stmbAutoSourceRef: sourceRef,
-                        stmbAutoFacts: facts,
                         stmbAutoVerifiedByHuman: false,
                     },
                     // Only the last write needs to refresh the editor.

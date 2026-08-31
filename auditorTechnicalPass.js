@@ -29,13 +29,25 @@
 //       ],
 //     },
 //     claimReverification: {
-//       summary: { entriesChecked, rangesChecked, confirmed, flagged, unknown },
+//       summary: { entriesChecked, rangesChecked, confirmed, flagged, unknown, noProvenance },
 //       issues: [
 //         { entryUid, title, severity, code, message, suggestion },
 //         ...
 //       ],
 //     },
 //   }
+//
+// PHA-2722: an entry is eligible for claim re-verification if it is a scene
+// memory (`stmemorybooks === true`) OR it carries `src: msgs X–Y` provenance
+// in its content, whichever kind of entry it is. Lore/context entries
+// (one-shot, Clipper+'s paired context entry) never set `stmemorybooks` —
+// gating on that flag alone silently excluded every citation those writers
+// produce, which is the mechanical reason one-shot entries were invisible
+// here even before one-shot started emitting `src: msgs` at all.
+// `noProvenance` counts eligible-by-memory-flag entries that have nothing to
+// check, distinct from `unknown` (checked, but the heuristic had insufficient
+// signal) — "no citation, cannot verify" is not the same finding as "verified
+// and inconclusive".
 //
 // Severity levels: 'info' (no action), 'warn' (consider fixing), 'error' (fix recommended).
 //
@@ -427,12 +439,27 @@ export function extractProvenanceRanges(content) {
  * A range is "confirmed" when its prose claim keywords are present in the
  * chat slice. A range is "flagged" when a contradiction token (plan §4.4
  * "contradiction = report") appears in the slice and the entry doesn't
- * mention it. Everything else is "unknown" (insufficient signal).
+ * mention it. Everything else is "unknown" (insufficient signal) — distinct
+ * from `noProvenance`, an eligible entry with no `src: msgs` citation at all
+ * (PHA-2722 finding 5: "checked, inconclusive" and "nothing to check" are
+ * different findings and must not collapse into one bucket).
+ *
+ * Eligibility is `stmemorybooks === true` OR the entry has extractable
+ * provenance ranges (PHA-2722): gating on the memory flag alone silently
+ * excluded every lore/context entry — one-shot, Clipper+'s paired context
+ * entry — regardless of whether it carried a citation, which is what made
+ * one-shot's entries invisible here even independent of one-shot's prompt
+ * never asking for provenance in the first place.
+ *
+ * Entries are processed in `stmbAutoConfidence` priority order — 'inferred'
+ * first — so the field the one-shot path stamps has a real job: telling this
+ * pass which entries to look at first, rather than a second, unread
+ * provenance record (PHA-2681 review finding 4).
  *
  * @param {object} entry            normalized entry (or raw entry)
  * @param {Array<object>} chatSlice  chat messages in the provenance range
  * @returns {{
- *   summary: { entriesChecked: number, rangesChecked: number, confirmed: number, flagged: number, unknown: number },
+ *   summary: { entriesChecked: number, rangesChecked: number, confirmed: number, flagged: number, unknown: number, noProvenance: number },
  *   issues: Array<{ entryUid, title, severity, code, message, suggestion, range? }>,
  *   rangeVerdicts: Array<{ uid, title, range, verdict, reason }>,
  * }}
@@ -448,6 +475,7 @@ export function runClaimReverification(lorebookData, chatSlice, opts = {}) {
     let confirmed = 0;
     let flagged = 0;
     let unknown = 0;
+    let noProvenance = 0;
 
     const entries = lorebookData?.entries && typeof lorebookData.entries === 'object'
         ? lorebookData.entries : {};
@@ -456,13 +484,20 @@ export function runClaimReverification(lorebookData, chatSlice, opts = {}) {
         .join('\n')
         .toLowerCase();
 
-    for (const uid of Object.keys(entries)) {
+    // stable sort (Node/V8 guarantee) — ties keep their original key order.
+    const uids = Object.keys(entries).sort((a, b) => {
+        const pa = entries[a]?.stmbAutoConfidence === 'inferred' ? 0 : 1;
+        const pb = entries[b]?.stmbAutoConfidence === 'inferred' ? 0 : 1;
+        return pa - pb;
+    });
+
+    for (const uid of uids) {
         const raw = entries[uid];
-        if (!isMemoryEntry(raw)) continue;
         const e = normalizeEntry(raw, uid);
-        entriesChecked++;
         const ranges = extractProvenanceRanges(e.content);
-        if (ranges.length === 0) continue;
+        if (!isMemoryEntry(raw) && ranges.length === 0) continue;
+        entriesChecked++;
+        if (ranges.length === 0) { noProvenance++; continue; }
 
         for (const range of ranges) {
             rangesChecked++;
@@ -492,6 +527,7 @@ export function runClaimReverification(lorebookData, chatSlice, opts = {}) {
             confirmed,
             flagged,
             unknown,
+            noProvenance,
         },
         issues,
         rangeVerdicts,

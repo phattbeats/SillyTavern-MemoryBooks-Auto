@@ -171,6 +171,14 @@ test('renderClaimReverificationHTML: shows empty-state message when all confirme
     assert.ok(html.includes('No claims flagged'));
 });
 
+test('PHA-2722: renderClaimReverificationHTML surfaces noProvenance separately from unknown', () => {
+    const report = { summary: { confirmed: 1, flagged: 0, unknown: 0, noProvenance: 2 }, rangeVerdicts: [
+        { uid: 1, title: 'A', range: 'msgs 1-2', verdict: 'confirmed', reason: 'ok' },
+    ]};
+    const html = renderClaimReverificationHTML(report);
+    assert.ok(html.includes('2 entries with no provenance, cannot verify'));
+});
+
 // ----------------------------------------------------------------------------
 // Popup adapters — synthetic (Node/test) path
 // ----------------------------------------------------------------------------

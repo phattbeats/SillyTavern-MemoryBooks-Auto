@@ -451,6 +451,44 @@ test('claim re-verification parses provenance ranges and reports per-range verdi
     assert.equal(r.rangeVerdicts[1].range.start, 1);
 });
 
+test('PHA-2722: a lore/context entry (no stmemorybooks flag) with a src: msgs citation is still checked', () => {
+    // one-shot's generated lore entries and Clipper+'s paired context entry
+    // never set stmemorybooks — gating eligibility on that flag alone made
+    // them invisible to claim re-verification regardless of provenance.
+    const lb = { entries: { 1: {
+        comment: 'Drowned City',
+        key: ['Drowned City'],
+        content: 'Alice visited the Drowned City.\nsrc: msgs 3–7',
+        stmemorybooks: false,
+    } } };
+    const chatSlice = [{ name: 'Narrator', mes: 'Alice travels to the Drowned City.' }];
+    const r = runClaimReverification(lb, chatSlice);
+    assert.equal(r.summary.entriesChecked, 1);
+    assert.equal(r.summary.rangesChecked, 1);
+    assert.equal(r.summary.confirmed, 1);
+});
+
+test('PHA-2722: noProvenance is counted separately from unknown', () => {
+    const lb = { entries: {
+        1: makeEntry({ comment: 'No citation', content: 'Alice did something with no citation.' }),
+        2: makeEntry({ comment: 'Empty slice', content: 'Bob did something.\nsrc: msgs 1–2' }),
+    } };
+    const r = runClaimReverification(lb, []);
+    assert.equal(r.summary.noProvenance, 1);
+    assert.equal(r.summary.unknown, 1);
+});
+
+test('PHA-2722: entries are re-checked in stmbAutoConfidence ranking order (inferred first)', () => {
+    const lb = { entries: {
+        1: makeEntry({ comment: 'Stated entry', content: 'Alice visited the village.\nsrc: msgs 1–2', stmbAutoConfidence: 'stated' }),
+        2: makeEntry({ comment: 'Inferred entry', content: 'Bob visited the village.\nsrc: msgs 1–2', stmbAutoConfidence: 'inferred' }),
+    } };
+    const chatSlice = [{ name: 'Narrator', mes: 'Alice and Bob visited the village.' }];
+    const r = runClaimReverification(lb, chatSlice);
+    assert.equal(r.rangeVerdicts[0].title, 'Inferred entry');
+    assert.equal(r.rangeVerdicts[1].title, 'Stated entry');
+});
+
 // ----------------------------------------------------------------------------
 // runAuditorJobs
 // ----------------------------------------------------------------------------
