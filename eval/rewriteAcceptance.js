@@ -16,7 +16,7 @@
 //     1. checkNoKeywordCollisions   — no keyword claimed by two entries
 //     2. checkNoZeroKeyEntries      — no entry ships with zero keys
 //     3. checkNoOverbroadKeywords   — no key fires on nearly every message
-//     4. checkProvenanceInBounds    — stmbAutoSourceRef parses and is in-range
+//     4. checkProvenanceInBounds    — `src: msgs X–Y` parses and is in-range
 //     5. checkZeroWritesOnRerun     — re-run on unchanged source writes nothing
 //     6. checkHumanPinSurvives      — a pinned entry survives; contradictions
 //                                     are reported, never silently overwritten
@@ -54,13 +54,21 @@
 // file's orchestration ever changes; a divergence there is a harness bug, not
 // a product bug.
 //
-// Check 4 covers the `stmbAutoSourceRef` provenance format (PHA-2681, the
-// one-shot lore path this harness exercises). The OLDER `src: msgs X-Y`
-// format (nudgeHelpers.js, consumed by auditorTechnicalPass.js's claim
-// reverification) belongs to the scene-memory-creation path, which this
-// harness does not exercise — no scene memories are ever created here, so
-// there is nothing of that shape to check. See PHA-2722 for the state of
-// those two systems.
+// Checks 4 and 9 read provenance as `src: msgs X–Y` lines in entry CONTENT,
+// via the same `extractProvenanceRanges` the product's claim re-verification
+// uses. PHA-2722 collapsed the two provenance systems this file's earlier
+// comment described: `stmbAutoSourceRef` (an entry property nothing read) is
+// gone, and one-shot now emits `src: msgs` citations like every other writer.
+//
+// This matters to the harness specifically, and is why the switch is not
+// optional: both checks used to `continue` past any entry whose
+// `stmbAutoSourceRef` didn't parse. With the field removed that guard hits
+// EVERY entry, so check 4 returns `ok: true` with zero offenders and check 9
+// returns `checked: 0` — two of nine acceptance checks passing unconditionally
+// without inspecting anything. A harness that cannot fail proves nothing
+// (see the calibration note at the top of this file), so check 4 now also
+// fails a non-empty book in which NO entry carries provenance at all, rather
+// than reporting that as clean.
 
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -71,6 +79,7 @@ import { deriveGroundTruth } from './groundTruth.js';
 import { scoreBoundaries } from './score.js';
 
 import { extractAuditMessages } from '../auditorCore.js';
+import { extractProvenanceRanges } from '../auditorTechnicalPass.js';
 import {
     ONE_SHOT_DEFAULTS,
     ONE_SHOT_PROMPT,
@@ -171,7 +180,6 @@ export function projectEntries(lorebookData) {
             stmbAutoContentHash: entry.stmbAutoContentHash,
             stmbAutoVerifiedByHuman: entry.stmbAutoVerifiedByHuman === true,
             stmbAutoConfidence: entry.stmbAutoConfidence,
-            stmbAutoSourceRef: entry.stmbAutoSourceRef,
         });
     }
     return out;
@@ -219,7 +227,6 @@ export function upsertByTitle(book, title, content, overrides = {}) {
         stmbAutoContentHash: overrides.stmbAutoContentHash,
         stmbAutoVerifiedByHuman: overrides.stmbAutoVerifiedByHuman === true,
         stmbAutoConfidence: overrides.stmbAutoConfidence,
-        stmbAutoSourceRef: overrides.stmbAutoSourceRef,
     };
     if (idx >= 0) { book[idx] = next; return { created: false, updated: true }; }
     book.push(next);
@@ -271,7 +278,9 @@ export async function runOneShotStep({ book, auditMessages, transcriptText, gene
 
     const writes = [];
     for (const entry of pinning.toWrite) {
-        const { confidence, sourceRef } = attributeSources(entry.content, auditMessages);
+        // PHA-2722: `stmbAutoConfidence` is the only provenance-derived property
+        // the product persists now — the citations themselves live in content.
+        const { confidence } = attributeSources(entry.content, auditMessages);
         const overrides = {
             key: entry.key,
             keysecondary: entry.keysecondary,
@@ -279,11 +288,10 @@ export async function runOneShotStep({ book, auditMessages, transcriptText, gene
             disable: false,
             stmbAutoContentHash: hashContent(entry.content),
             stmbAutoConfidence: confidence,
-            stmbAutoSourceRef: sourceRef,
             stmbAutoVerifiedByHuman: false,
         };
         const res = upsertByTitle(book, entry.title, entry.content, overrides);
-        writes.push({ title: entry.title, sourceRef, confidence, ...res });
+        writes.push({ title: entry.title, confidence, ...res });
     }
 
     // Latch the pin, same as oneShotLorebook.js:252-268: re-write the SAME prior
@@ -348,32 +356,66 @@ export function checkNoOverbroadKeywords({ book, messages, maxFireFraction = REW
     return { ok: offenders.length === 0, offenders, maxFireFraction };
 }
 
-const SOURCE_REF_RE = /^(\d+)(?:-(\d+))?$/;
+/** A `src: msgs` marker in any shape, valid or not — used to tell "no citation
+ *  was written" apart from "a citation was written but is malformed". */
+const PROVENANCE_MARKER_RE = /src:\s*msgs\b/gi;
+
+/** How many `src: msgs` markers appear in `content`, parseable or not. */
+function countProvenanceMarkers(content) {
+    PROVENANCE_MARKER_RE.lastIndex = 0;
+    let n = 0;
+    while (PROVENANCE_MARKER_RE.exec(String(content ?? '')) !== null) n++;
+    return n;
+}
 
 /**
- * Check 4: `stmbAutoSourceRef` parses, and every range is in-bounds for the
- * source transcript. An empty ref is not itself a failure — `attributeSources`
- * legitimately emits '' when no sentence matched strongly enough (a purely
- * inferred entry) — but anything non-empty must parse as "N" or "N-M" with
- * both ends inside [idMin, idMax].
+ * Check 4: every `src: msgs X–Y` citation in entry content parses and is
+ * in-bounds for the source transcript. An entry with no citation is not itself
+ * a failure — `attributeSources` legitimately finds nothing to cite on a purely
+ * inferred entry — but a citation that IS written must parse and sit inside
+ * [idMin, idMax].
+ *
+ * A non-empty book in which no entry carries any citation IS a failure
+ * (`no-provenance-in-book`). Before PHA-2722 this function read a
+ * `stmbAutoSourceRef` property and skipped anything that didn't parse; once
+ * that property was removed the skip swallowed every entry and the check
+ * passed unconditionally. "Nothing to check" is not "clean" — that distinction
+ * is the same one PHA-2722 drew in the product between `noProvenance` and
+ * `unknown`.
  *
  * @param {{book:Array<object>, idMin:number, idMax:number}} p
  */
 export function checkProvenanceInBounds({ book, idMin, idMax } = {}) {
     const offenders = [];
-    for (const e of (book || [])) {
-        if (e.disable) continue;
-        const ref = e.stmbAutoSourceRef;
-        if (ref == null || ref === '') continue;
-        const m = SOURCE_REF_RE.exec(String(ref));
-        if (!m) { offenders.push({ title: e.title, ref, reason: 'unparseable' }); continue; }
-        const a = Number(m[1]);
-        const b = m[2] != null ? Number(m[2]) : a;
-        if (a > b || a < idMin || b > idMax) {
-            offenders.push({ title: e.title, ref, reason: 'out-of-bounds', idMin, idMax });
+    const live = (book || []).filter((e) => !e.disable);
+    let cited = 0;
+
+    for (const e of live) {
+        const ranges = extractProvenanceRanges(e.content);
+        const markers = countProvenanceMarkers(e.content);
+        if (markers > ranges.length) {
+            offenders.push({ title: e.title, ref: e.content, reason: 'unparseable' });
+        }
+        if (ranges.length === 0) continue;
+        cited++;
+        for (const r of ranges) {
+            if (r.start < idMin || r.end > idMax) {
+                offenders.push({
+                    title: e.title,
+                    ref: `${r.start}-${r.end}`,
+                    reason: 'out-of-bounds',
+                    idMin,
+                    idMax,
+                });
+            }
         }
     }
-    return { ok: offenders.length === 0, offenders, idMin, idMax };
+
+    if (live.length > 0 && cited === 0) {
+        offenders.push({ title: null, ref: null, reason: 'no-provenance-in-book' });
+    }
+
+    return { ok: offenders.length === 0, offenders, idMin, idMax, cited, entries: live.length };
 }
 
 /** Check 5: a re-run on unchanged source produces zero writes (PHA-2681's own Done-when). */
@@ -420,10 +462,13 @@ export function checkHumanPinSurvives({ pinning, pinnedTitles, book, preStepCont
 /**
  * Check 9 (N-slice only): an entry whose source material never changed must be
  * byte-identical across steps — not a re-worded photocopy. "Never changed"
- * means its `stmbAutoSourceRef` range ends at or before the PREVIOUS step's
- * slice boundary, i.e. no new message could have informed a rewrite.
+ * means the LAST message cited by its `src: msgs X–Y` lines sits at or before
+ * the PREVIOUS step's slice boundary, i.e. no new message could have informed
+ * a rewrite. Reads citations from content (PHA-2722) — the `stmbAutoSourceRef`
+ * property this used to consult no longer exists, and skipping on its absence
+ * silently reduced this check to `checked: 0`.
  *
- * @param {{before:Array<{title:string, content:string, stmbAutoSourceRef:string}>,
+ * @param {{before:Array<{title:string, content:string}>,
  *          after:Array<{title:string, content:string}>, prevBoundary:number}} p
  */
 export function checkDrift({ before, after, prevBoundary } = {}) {
@@ -434,13 +479,13 @@ export function checkDrift({ before, after, prevBoundary } = {}) {
         const key = e.title.trim().toLowerCase();
         const prior = beforeByTitle.get(key);
         if (!prior) continue; // new entry this step — nothing to compare
-        const m = SOURCE_REF_RE.exec(String(prior.stmbAutoSourceRef ?? ''));
-        if (!m) continue; // no ref to reason about staleness from
-        const end = m[2] != null ? Number(m[2]) : Number(m[1]);
+        const ranges = extractProvenanceRanges(prior.content);
+        if (ranges.length === 0) continue; // no citation to reason about staleness from
+        const end = Math.max(...ranges.map((r) => r.end));
         if (end > prevBoundary) continue; // source COULD have changed for this entry
         checked++;
         if (e.content !== prior.content) {
-            offenders.push({ title: e.title, sourceRef: prior.stmbAutoSourceRef, prevBoundary });
+            offenders.push({ title: e.title, sourceRef: `${end}`, prevBoundary });
         }
     }
     return { ok: offenders.length === 0, offenders, checked };
@@ -591,7 +636,7 @@ export async function replayNSlices({ book: initialBook = [], auditMessages, bou
         const slice = (auditMessages || []).filter((m) => m.id < boundary);
         const transcriptText = formatTranscript(slice, cfg.truncate);
 
-        const before = book.map((e) => ({ title: e.title, content: e.content, stmbAutoSourceRef: e.stmbAutoSourceRef }));
+        const before = book.map((e) => ({ title: e.title, content: e.content }));
         const result = await runOneShotStep({ book, auditMessages: slice, transcriptText, generate, cfg });
         const after = book.map((e) => ({ title: e.title, content: e.content }));
 

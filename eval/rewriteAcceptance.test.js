@@ -112,29 +112,53 @@ describe('checkNoOverbroadKeywords', () => {
 // ---------------------------------------------------------------- check 4
 
 describe('checkProvenanceInBounds', () => {
-    test('clean: refs parse and sit inside the transcript range', () => {
-        const book = [entry('A', ['a'], { stmbAutoSourceRef: '5-9' }), entry('B', ['b'], { stmbAutoSourceRef: '12' })];
+    test('clean: citations parse and sit inside the transcript range', () => {
+        const book = [
+            entry('A', ['a'], { content: 'Grondulf is a landlord. src: msgs 5\u20139' }),
+            entry('B', ['b'], { content: 'Mira trades salt. src: msgs 12\u201312' }),
+        ];
         const r = checkProvenanceInBounds({ book, idMin: 0, idMax: 300 });
         assert.equal(r.ok, true);
+        assert.equal(r.cited, 2);
     });
 
-    test('an empty ref is not a failure (a purely inferred entry)', () => {
-        const book = [entry('A', ['a'], { stmbAutoSourceRef: '' })];
-        assert.equal(checkProvenanceInBounds({ book, idMin: 0, idMax: 300 }).ok, true);
+    test('an uncited entry is not itself a failure (a purely inferred entry)', () => {
+        const book = [
+            entry('A', ['a'], { content: 'Grondulf is a landlord. src: msgs 5\u20139' }),
+            entry('B', ['b'], { content: 'Mira seems anxious.' }),
+        ];
+        const r = checkProvenanceInBounds({ book, idMin: 0, idMax: 300 });
+        assert.equal(r.ok, true);
+        assert.equal(r.cited, 1);
     });
 
-    test('broken: unparseable ref', () => {
-        const book = [entry('A', ['a'], { stmbAutoSourceRef: 'the whole story' })];
+    test('broken: unparseable citation', () => {
+        const book = [entry('A', ['a'], { content: 'Grondulf is a landlord. src: msgs the whole story' })];
         const r = checkProvenanceInBounds({ book, idMin: 0, idMax: 300 });
         assert.equal(r.ok, false);
-        assert.equal(r.offenders[0].reason, 'unparseable');
+        assert.ok(r.offenders.some((o) => o.reason === 'unparseable'));
     });
 
-    test('broken: ref range outside the transcript', () => {
-        const book = [entry('A', ['a'], { stmbAutoSourceRef: '450-460' })];
+    test('broken: citation range outside the transcript', () => {
+        const book = [entry('A', ['a'], { content: 'Grondulf is a landlord. src: msgs 450\u2013460' })];
         const r = checkProvenanceInBounds({ book, idMin: 0, idMax: 300 });
         assert.equal(r.ok, false);
         assert.equal(r.offenders[0].reason, 'out-of-bounds');
+    });
+
+    // PHA-2722 regression: with provenance moved out of `stmbAutoSourceRef` and
+    // into content, a book where NOTHING is cited used to make this check pass
+    // with zero offenders — a check that cannot fail. It must report instead.
+    test('broken: no entry in the book carries any citation', () => {
+        const book = [entry('A', ['a'], { content: 'Grondulf is a landlord.' })];
+        const r = checkProvenanceInBounds({ book, idMin: 0, idMax: 300 });
+        assert.equal(r.ok, false);
+        assert.equal(r.offenders[0].reason, 'no-provenance-in-book');
+        assert.equal(r.cited, 0);
+    });
+
+    test('an empty book is vacuously clean', () => {
+        assert.equal(checkProvenanceInBounds({ book: [], idMin: 0, idMax: 300 }).ok, true);
     });
 });
 
@@ -196,24 +220,24 @@ describe('checkHumanPinSurvives', () => {
 
 describe('checkDrift', () => {
     test('clean: an entry whose source predates the new slice comes back byte-identical', () => {
-        const before = [{ title: 'Grondulf', content: 'Grondulf is a landlord.', stmbAutoSourceRef: '5-9' }];
-        const after = [{ title: 'Grondulf', content: 'Grondulf is a landlord.' }];
+        const before = [{ title: 'Grondulf', content: 'Grondulf is a landlord. src: msgs 5\u20139' }];
+        const after = [{ title: 'Grondulf', content: 'Grondulf is a landlord. src: msgs 5\u20139' }];
         const r = checkDrift({ before, after, prevBoundary: 50 });
         assert.equal(r.ok, true);
         assert.equal(r.checked, 1);
     });
 
     test('broken: same untouched source, but the reply reworded it anyway', () => {
-        const before = [{ title: 'Grondulf', content: 'Grondulf is a landlord.', stmbAutoSourceRef: '5-9' }];
-        const after = [{ title: 'Grondulf', content: 'Grondulf, landlord of the estate.' }];
+        const before = [{ title: 'Grondulf', content: 'Grondulf is a landlord. src: msgs 5\u20139' }];
+        const after = [{ title: 'Grondulf', content: 'Grondulf, landlord of the estate. src: msgs 5\u20139' }];
         const r = checkDrift({ before, after, prevBoundary: 50 });
         assert.equal(r.ok, false);
         assert.equal(r.offenders[0].title, 'Grondulf');
     });
 
     test('not checked: the entry\'s source range extends into the new slice', () => {
-        const before = [{ title: 'Grondulf', content: 'Grondulf is a landlord.', stmbAutoSourceRef: '5-60' }];
-        const after = [{ title: 'Grondulf', content: 'Grondulf is a landlord who now also mentors Sable.' }];
+        const before = [{ title: 'Grondulf', content: 'Grondulf is a landlord. src: msgs 5\u201360' }];
+        const after = [{ title: 'Grondulf', content: 'Grondulf is a landlord who now also mentors Sable. src: msgs 5\u201360' }];
         const r = checkDrift({ before, after, prevBoundary: 50 });
         assert.equal(r.ok, true);
         assert.equal(r.checked, 0);
