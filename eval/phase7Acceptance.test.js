@@ -11,6 +11,7 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 
 import { deriveGroundTruth } from './groundTruth.js';
 import {
@@ -38,6 +39,10 @@ import {
     replay,
     scoreCoverage,
 } from './phase7Acceptance.js';
+
+// Local eval fixtures no longer ship with the repo; skip fixture-bound tests
+// when they are absent (see eval/parser.test.js for the same convention).
+const HAVE_LOCAL_FIXTURES = existsSync(DEFAULT_FIXTURE) && existsSync(DEFAULT_WORLDBOOK);
 
 // ----------------------------------------------------------------------------
 // Synthetic fixtures — small, so most tests do not pay for the 329-msg replay
@@ -109,7 +114,7 @@ async function realReplayBase() {
 // ----------------------------------------------------------------------------
 
 describe('fixture loading', () => {
-    test('chat[i] is message index i+1 — the offset every score in this file rests on', async () => {
+    test('chat[i] is message index i+1 — the offset every score in this file rests on', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const { messages, chat } = await loadFixture(DEFAULT_FIXTURE);
         assert.equal(chat.length, messages.length);
         for (const i of [0, 1, 50, messages.length - 1]) {
@@ -118,7 +123,7 @@ describe('fixture loading', () => {
         }
     });
 
-    test('lorebook loads with numeric uids and a uid->entry map that agrees', async () => {
+    test('lorebook loads with numeric uids and a uid->entry map that agrees', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const { entries, byUid } = await loadLorebook(DEFAULT_WORLDBOOK);
         assert.ok(entries.length > 0);
         for (const e of entries) {
@@ -129,7 +134,7 @@ describe('fixture loading', () => {
 });
 
 describe('SANITY GATE 1 — the boundary key', () => {
-    test('the oracle is an independent implementation, not a call into the key', async () => {
+    test('the oracle is an independent implementation, not a call into the key', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const { messages } = await realReplayBase();
         const gate = oracleBoundaryGate(messages);
         assert.equal(gate.score.precision, 1);
@@ -137,7 +142,7 @@ describe('SANITY GATE 1 — the boundary key', () => {
         assert.deepEqual(gate.oracle, gate.key);
     });
 
-    test('the key uses the fine-grained rules, not the condemned 22-boundary one', async () => {
+    test('the key uses the fine-grained rules, not the condemned 22-boundary one', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const { messages } = await realReplayBase();
         const fine = deriveGroundTruth(messages, { minSceneMessages: 6 });
         const legacy = deriveGroundTruth(messages, { minSceneMessages: 6, mergeMode: 'own' });
@@ -146,7 +151,7 @@ describe('SANITY GATE 1 — the boundary key', () => {
         assert.equal(fine.boundaries.length, 35, 'the key Phase 7 is graded against');
     });
 
-    test('the oracle DISAGREES when the merge rules disagree — the gate can fail', async () => {
+    test('the oracle DISAGREES when the merge rules disagree — the gate can fail', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const { messages } = await realReplayBase();
         // Score the fine-grained oracle against the legacy key on purpose. If
         // this came back 1.0/1.0 the gate would be tautological and useless.
@@ -155,7 +160,7 @@ describe('SANITY GATE 1 — the boundary key', () => {
         assert.notDeepEqual(oracle, legacy.boundaries);
     });
 
-    test('scenes tile the transcript with no gap and no overlap', async () => {
+    test('scenes tile the transcript with no gap and no overlap', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const { messages, scenes } = await realReplayBase();
         assert.equal(scenes[0].start, 1);
         assert.equal(scenes[scenes.length - 1].end, messages.length);
@@ -214,7 +219,7 @@ describe('SANITY GATE 2 — the coverage scorer', () => {
 });
 
 describe('GATE 1 — parity', () => {
-    test('librarian disabled means zero calls and zero injected bytes, every turn', async () => {
+    test('librarian disabled means zero calls and zero injected bytes, every turn', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const base = await realReplayBase();
         let called = 0;
         const run = await replay({
@@ -314,7 +319,7 @@ describe('GATE 3 — coverage vs the keyword baseline', () => {
         assert.ok(ids.every((u) => u >= 1 && u <= 20));
     });
 
-    test('the librarian set is ADDITIVE — the keyword floor is never reduced', async () => {
+    test('the librarian set is ADDITIVE — the keyword floor is never reduced', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const base = await realReplayBase();
         const run = await replay({
             ...base,
@@ -328,7 +333,7 @@ describe('GATE 3 — coverage vs the keyword baseline', () => {
         }
     });
 
-    test('coverage beats the keyword baseline on the real fixture', async () => {
+    test('coverage beats the keyword baseline on the real fixture', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const base = await realReplayBase();
         const run = await replay({
             ...base,
@@ -341,7 +346,7 @@ describe('GATE 3 — coverage vs the keyword baseline', () => {
         assert.equal(cov.ok, true);
     });
 
-    test('coverage FAILS when the librarian adds nothing over the floor', async () => {
+    test('coverage FAILS when the librarian adds nothing over the floor', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const base = await realReplayBase();
         // topUp off as well as an empty model answer: with the P7.3 name-scan
         // running, "the model selected nothing" does NOT mean "nothing was
@@ -353,7 +358,7 @@ describe('GATE 3 — coverage vs the keyword baseline', () => {
         assert.equal(cov.ok, false, 'an inert librarian must not be able to pass this gate');
     });
 
-    test('the P7.3 top-up alone adds coverage, even when the model selects nothing', async () => {
+    test('the P7.3 top-up alone adds coverage, even when the model selects nothing', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const base = await realReplayBase();
         const withTopUp = await replay({ ...base, select: async () => '[]', now: () => 0 });
         const without = await replay({ ...base, select: async () => '[]', config: { topUp: false }, now: () => 0 });
@@ -366,7 +371,7 @@ describe('GATE 3 — coverage vs the keyword baseline', () => {
 });
 
 describe('GATE 3b — token budget', () => {
-    test('the budget is never exceeded across the full replay', async () => {
+    test('the budget is never exceeded across the full replay', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const base = await realReplayBase();
         const run = await replay({
             ...base,
@@ -386,7 +391,7 @@ describe('GATE 3b — token budget', () => {
         assert.equal(checkTokenBudget(tooMany).ok, false);
     });
 
-    test('cached turns are budgeted too — the cache stores a selection, not a plan', async () => {
+    test('cached turns are budgeted too — the cache stores a selection, not a plan', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const base = await realReplayBase();
         const run = await replay({
             ...base,
@@ -434,7 +439,7 @@ describe('GATE 4 — latency', () => {
         assert.equal(checkLatency([{ t: 1, source: 'call', ms: 2500 }]).ok, false);
     });
 
-    test('the scene cache removes the great majority of calls on the real fixture', async () => {
+    test('the scene cache removes the great majority of calls on the real fixture', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
         const base = await realReplayBase();
         const run = await replay({
             ...base,

@@ -637,7 +637,7 @@ export async function addMemoryToLorebook(memoryResult, lorebookValidation, opti
  */
 /**
  * Drops keywords that are a whole-word substring of another keyword already
- * in the list (e.g. "Brandon" alongside "Brandon Kelly"), keeping the more
+ * in the list (e.g. "Rowan" alongside "Rowan Hale"), keeping the more
  * specific/longer form. The coverage-regen path (PR #20, 417f90e) scopes
  * keywords per-entity in its own prompt, but the primary scene-entry path
  * takes suggestedKeys from the summarizer as-is — this is the equivalent

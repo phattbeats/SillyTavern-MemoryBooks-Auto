@@ -416,12 +416,14 @@ test('OpenAIDetector + runDetection dedupes overlapping boundaries', async () =>
     assert.equal(out.skipped, 0);
 });
 
-test('parser fixture smoke: windows produced from the bundled transcript', async () => {
+const { existsSync } = await import('node:fs');
+const { dirname: _dn, resolve: _rs } = await import('node:path');
+const { fileURLToPath: _fp } = await import('node:url');
+const _fixturePath = _rs(_dn(_fp(import.meta.url)), 'fixtures/transcript.jsonl');
+
+test('parser fixture smoke: windows produced from the bundled transcript', { skip: !existsSync(_fixturePath) }, async () => {
     const fs = await import('node:fs/promises');
-    const path = await import('node:path');
-    const url = await import('node:url');
-    const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
-    const text = await fs.readFile(path.resolve(__dirname, 'fixtures/transcript.jsonl'), 'utf8');
+    const text = await fs.readFile(_fixturePath, 'utf8');
     const { messages } = parseJsonlText(text);
     const windows = buildDetectionWindows(messages);
     assert.ok(windows.length >= 5, 'expected at least 5 windows on the 329-message fixture');

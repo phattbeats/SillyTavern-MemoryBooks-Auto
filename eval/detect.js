@@ -212,7 +212,7 @@ export function strictParseBoundaryArray(text) {
  * JSON discipline.
  *
  * Config keys (from eval/config.js or passed via `cfg`):
- *   baseUrl     e.g. http://10.0.0.100:4000  (no trailing slash)
+ *   baseUrl     e.g. http://<lan-host>:4000  (no trailing slash)
  *   model       e.g. claude-3-5-sonnet-20241022
  *   apiKey      bearer token
  *   temperature (default 0)
