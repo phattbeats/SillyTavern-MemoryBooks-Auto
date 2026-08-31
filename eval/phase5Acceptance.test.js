@@ -236,10 +236,17 @@ test('runAuditWalk flags the deleted character in the coverage report', { skip: 
 // Technical pass catches a planted keyword collision (criterion 4)
 // ----------------------------------------------------------------------------
 
-test('runAuditWalk flags the planted "button" entry in the technical report', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
+test('runAuditWalk flags the planted "lamp" entry in the technical report', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
+    // PHA-2737: the planted keyword is now 'lamp' (not in DEFAULT_COMMON_WORDS).
+    // The offline walker must thread settings through to runTechnicalPass so
+    // 'lamp' is supplied as a user-supplied common word. Without that threading,
+    // the planted entry's sole keyword is not in the common-words set and the
+    // keyword-common-only check cannot fire. We exercise both the threaded
+    // path (this test, must flag) and the unthreaded path (next test, must
+    // NOT flag) to lock both branches down.
     const { chat } = await loadFixture();
     const { entries, plantedUid } = await prepareLorebook(DEFAULT_WORLDBOOK, {
-        plantedKeyword: 'button',
+        plantedKeyword: 'lamp',
     });
     const knownNames = new Set();
     for (const e of Object.values(entries)) {
@@ -249,6 +256,7 @@ test('runAuditWalk flags the planted "button" entry in the technical report', { 
         chat,
         lorebookData: { entries },
         knownNames: Array.from(knownNames),
+        settings: { moduleSettings: { autoModule: { technicalPassCommonWords: ['lamp'] } } },
     });
     assert.ok(walk.reports, 'walk should produce reports');
     const tech = walk.reports.technical;
@@ -262,9 +270,16 @@ test('runAuditWalk flags the planted "button" entry in the technical report', { 
     assert.equal(planted.severity, 'error');
 });
 
-test('runAuditWalk does NOT flag the multi-keyword "Button Firewood" character (existing fixture entry)', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
+test('runAuditWalk does NOT flag the planted "lamp" entry when no settings thread "lamp" through', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
+    // PHA-2737 lock-down: when settings are not threaded (so 'lamp' is NOT in
+    // the effective common-words set), the planted entry's sole keyword is not
+    // a common word, so the keyword-common-only check must NOT fire. This is
+    // the key contract change vs the pre-PHA-2737 behavior where 'button'
+    // lived in DEFAULT_COMMON_WORDS and the check fired unconditionally.
     const { chat } = await loadFixture();
-    const { entries } = await prepareLorebook(DEFAULT_WORLDBOOK, { plantedKeyword: 'button' });
+    const { entries, plantedUid } = await prepareLorebook(DEFAULT_WORLDBOOK, {
+        plantedKeyword: 'lamp',
+    });
     const knownNames = new Set();
     for (const e of Object.values(entries)) {
         if (Array.isArray(e.key)) for (const k of e.key) knownNames.add(String(k));
@@ -275,17 +290,43 @@ test('runAuditWalk does NOT flag the multi-keyword "Button Firewood" character (
         knownNames: Array.from(knownNames),
     });
     const tech = walk.reports.technical;
-    // The existing Button character has unique keys (Button Firewood, hollow-hide)
-    // so the keyword-common-only check should not fire for it.
-    const existingButton = tech.issues.find(
-        (i) => i.code === 'keyword-common-only' && /button/i.test(i.message)
-            && /Button Firewood|hollow-hide/.test(i.message) === false
+    const planted = tech.issues.find(
+        (i) => Number(i.entryUid) === Number(plantedUid) && i.code === 'keyword-common-only'
     );
-    // We just want to confirm none of the flagged issues is for the
-    // multi-keyword Button character; the planted entry is the only one.
-    const plantedCount = tech.issues.filter((i) => i.code === 'keyword-common-only').length;
-    assert.ok(plantedCount === 1,
-        `expected exactly one keyword-common-only issue (the planted entry), got ${plantedCount}`);
+    assert.equal(planted, undefined,
+        `expected the planted entry NOT to be flagged (no settings threaded); got ${JSON.stringify(planted)}`);
+});
+
+test('runAuditWalk does NOT flag the multi-keyword "Button Firewood" character (existing fixture entry)', { skip: !HAVE_LOCAL_FIXTURES }, async () => {
+    // PHA-2737: 'button' is removed from DEFAULT_COMMON_WORDS, but the
+    // existing Button Firewood entry (uid 7) is multi-keyword (Button,
+    // Button Firewood, Firewood, hollow-hide) so the common-only check still
+    // does NOT fire for it. The keyword-shared-across-entries check still
+    // fires for genuinely shared keys (e.g. 'the mire') regardless of the
+    // common-words default. This test verifies the multi-keyword Button
+    // character is NOT flagged common-only.
+    const { chat } = await loadFixture();
+    const { entries } = await prepareLorebook(DEFAULT_WORLDBOOK, { plantedKeyword: 'lamp' });
+    const knownNames = new Set();
+    for (const e of Object.values(entries)) {
+        if (Array.isArray(e.key)) for (const k of e.key) knownNames.add(String(k));
+    }
+    const walk = await runAuditWalk({
+        chat,
+        lorebookData: { entries },
+        knownNames: Array.from(knownNames),
+        // Note: settings omitted — we are not testing the planted-flag path
+        // here, only that the multi-keyword Button character is safe.
+    });
+    const tech = walk.reports.technical;
+    // The existing Button character has unique keys (Button Firewood, hollow-hide)
+    // so the keyword-common-only check should not fire for it. Search for any
+    // issue that mentions Button Firewood or hollow-hide to confirm.
+    const buttonCommonOnly = tech.issues.find(
+        (i) => i.code === 'keyword-common-only' && /button firewood|hollow-hide/i.test(i.message)
+    );
+    assert.equal(buttonCommonOnly, undefined,
+        `multi-keyword Button character must NOT be flagged common-only; got ${JSON.stringify(buttonCommonOnly)}`);
 });
 
 // ----------------------------------------------------------------------------
