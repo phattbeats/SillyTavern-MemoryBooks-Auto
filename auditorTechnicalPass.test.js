@@ -27,9 +27,12 @@ import {
 
 test('getCommonWords returns defaults when no settings', () => {
     const set = getCommonWords(null);
-    assert.ok(set.has('button'), 'must include the plan §6 example "button"');
     assert.ok(set.has('the'));
     assert.ok(set.has('and'));
+    // Plan §6 example common word ('lamp') is NOT in defaults — the planted
+    // keyword belongs in the eval harness's PHASE5_DEFAULTS.plantedKeyword,
+    // not in the global stopword list. See PHA-2737.
+    assert.ok(!set.has('lamp'), 'must NOT include the plan §6 example common noun (PHA-2737)');
 });
 
 test('getCommonWords merges user-supplied words case-insensitively', () => {
@@ -123,15 +126,18 @@ function makeEntry(overrides = {}) {
 }
 
 test('technical pass: flags common-word-only keywords (plan §6 example)', () => {
-    const lb = { entries: { 1: makeEntry({ key: ['button'] }) } };
-    const r = runTechnicalPass(lb);
+    // The plan §6 example common word is now ('lamp') and is supplied via the
+    // user override list, not the defaults — see PHA-2737. The technical
+    // pass still has to fire when a single common word is the sole keyword.
+    const lb = { entries: { 1: makeEntry({ key: ['lamp'] }) } };
+    const r = runTechnicalPass(lb, { settings: { moduleSettings: { autoModule: { technicalPassCommonWords: ['lamp'] } } } });
     assert.equal(r.summary.flaggedEntries, 1);
     assert.ok(r.issues.some((i) => i.code === 'keyword-common-only'));
 });
 
 test('technical pass: does NOT flag when a non-common keyword is present', () => {
-    const lb = { entries: { 1: makeEntry({ key: ['button', 'unique-noun'] }) } };
-    const r = runTechnicalPass(lb);
+    const lb = { entries: { 1: makeEntry({ key: ['lamp', 'unique-noun'] }) } };
+    const r = runTechnicalPass(lb, { settings: { moduleSettings: { autoModule: { technicalPassCommonWords: ['lamp'] } } } });
     assert.ok(!r.issues.some((i) => i.code === 'keyword-common-only'));
 });
 
@@ -318,7 +324,7 @@ test('technical pass: single-name entry does NOT fire multi-name rule', () => {
 test('technical pass skips entries without stmemorybooks flag', () => {
     const lb = {
         entries: {
-            1: { comment: 'not a memory entry', key: ['button'], constant: true, content: 'a'.repeat(2000) },
+            1: { comment: 'not a memory entry', key: ['lamp'], constant: true, content: 'a'.repeat(2000) },
         },
     };
     const r = runTechnicalPass(lb);
@@ -494,8 +500,11 @@ test('PHA-2722: entries are re-checked in stmbAutoConfidence ranking order (infe
 // ----------------------------------------------------------------------------
 
 test('runAuditorJobs runs both jobs', () => {
-    const lb = { entries: { 1: makeEntry({ key: ['button'] }) } };
-    const r = runAuditorJobs(lb, []);
+    // 'lamp' is the PHA-2737 replacement common word. It's still in the
+    // function-words set because the technical pass now consults settings +
+    // defaults; for this test we pass it through settings.
+    const lb = { entries: { 1: makeEntry({ key: ['lamp'] }) } };
+    const r = runAuditorJobs(lb, [], { settings: { moduleSettings: { autoModule: { technicalPassCommonWords: ['lamp'] } } } });
     assert.ok(r.technical);
     assert.ok(r.claimReverification);
     assert.equal(r.technical.summary.flaggedEntries, 1);
@@ -524,8 +533,8 @@ test('registerAuditorJobs: the technical executor returns a technical pass repor
     const api = { registerStmbJobExecutor: (type, fn) => registered.set(type, fn) };
     registerAuditorJobs(api);
     const executor = registered.get('stmbc-audit-technical');
-    const lb = { entries: { 1: makeEntry({ key: ['button'] }) } };
-    const result = await executor({ input: { lorebookData: lb, chatSlice: [] } });
+    const lb = { entries: { 1: makeEntry({ key: ['lamp'] }) } };
+    const result = await executor({ input: { lorebookData: lb, chatSlice: [], options: { settings: { moduleSettings: { autoModule: { technicalPassCommonWords: ['lamp'] } } } } } });
     assert.equal(result.ok, true);
     assert.ok(result.report);
     assert.ok(Array.isArray(result.report.issues));

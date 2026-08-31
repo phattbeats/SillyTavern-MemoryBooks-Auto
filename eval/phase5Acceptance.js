@@ -19,7 +19,7 @@
 //      been removed from the lorebook snapshot; runCoverageAudit must
 //      surface "Gruk" as missing/stale.
 //   4. Technical pass catches a planted keyword collision. A new entry
-//      whose ONLY keyword is the common word "button" is added to the
+//      whose ONLY keyword is the common word "lamp" is added to the
 //      lorebook snapshot; runTechnicalPass must flag it under the
 //      keyword-common-only code.
 //
@@ -33,7 +33,7 @@
 //   - loadFixture(fixturePath) — same shape as phase2Acceptance.loadFixture
 //   - prepareLorebook(worldbookPath, opts) — turns the bundled worldbook into
 //     a Phase 5 test lorebook (all entries marked stmemorybooks=true) and
-//     optionally plants the "button" entry and removes a character
+//     optionally plants the "lamp" entry and removes a character
 //   - planAuditChunks(chat, opts) — pure chunk plan
 //   - estimateChunkTokens(chunk) — char/4 estimate, matches auditorCore
 //   - serializeCheckpoint / deserializeCheckpoint — round-trip the
@@ -93,7 +93,7 @@ export const PHASE5_DEFAULTS = Object.freeze({
      */
     deletedCharacter: { name: 'Gruk', uid: 4 },
     /** The keyword the technical-pass-acceptance test plants. */
-    plantedKeyword: 'button',
+    plantedKeyword: 'lamp',
 });
 
 // ----------------------------------------------------------------------------
@@ -526,9 +526,17 @@ export async function runAuditWalk(deps) {
             if (!c) return [];
             return c.msgs.map((m) => ({ name: m.name, mes: m.mes, mesid: m._chatIndex }));
         });
+        // Thread settings through to the technical pass so user-supplied
+        // technicalPassCommonWords are honored. PHA-2737 moved the planted
+        // common-noun keyword out of the default list, so callers that want
+        // the keyword-common-only check to fire on a planted entry must
+        // supply the keyword via settings.technicalPassCommonWords.
+        const technicalOpts = deps.settings
+            ? { settings: deps.settings }
+            : {};
         walk.reports = {
             coverage: runCoverageAudit(notes, deps.lorebookData, {}),
-            technical: runTechnicalPass(deps.lorebookData, {}),
+            technical: runTechnicalPass(deps.lorebookData, technicalOpts),
             regeneration: runEntryRegeneration(deps.lorebookData, chatSlice, {}),
             claimReverification: runClaimReverification(deps.lorebookData, chatSlice, {}),
         };
