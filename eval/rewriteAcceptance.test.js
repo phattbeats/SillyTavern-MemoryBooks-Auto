@@ -14,7 +14,10 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
     loadFixture,
@@ -424,5 +427,52 @@ describe('projectEntries', () => {
         assert.deepEqual(e.keys, ['a']);
         assert.equal(e.isMemory, true);
         assert.equal(e.stmbAutoContentHash, 'h');
+    });
+});
+
+// ----------------------------------------------------------------------------
+// The runner's exit-code contract
+//
+// PHA-2729 leans on this harness as the gate the rewrite has to clear. The
+// fixtures it replays are personal chat logs and are deliberately not
+// distributed (see .gitignore), so the runner skips and exits 0 when they are
+// absent — which means a CI job invoking it can report success without having
+// checked anything. `--require-fixtures` is how a caller that actually depends
+// on the gate says so.
+// ----------------------------------------------------------------------------
+
+describe('runRewriteAcceptance CLI exit codes', () => {
+    const RUNNER = new URL('./runRewriteAcceptance.js', import.meta.url).pathname;
+
+    /** Spawn the runner against a fixture path that certainly does not exist. */
+    function runMissingFixtures(extraArgs) {
+        return new Promise((resolvePromise) => {
+            execFile(process.execPath, [
+                RUNNER, '--json',
+                '--transcript', '/nonexistent/transcript.jsonl',
+                '--reference-book', '/nonexistent/worldbook.json',
+                '--canned', '/nonexistent/canned.json',
+                '--out', mkdtempSync(join(tmpdir(), 'stmb-ra-')),
+                ...extraArgs,
+            ], (err, stdout) => {
+                resolvePromise({ code: err ? err.code : 0, stdout });
+            });
+        });
+    }
+
+    test('exits 0 and reports skipped when fixtures are absent (default)', async () => {
+        const { code, stdout } = await runMissingFixtures([]);
+        assert.equal(code, 0);
+        const report = JSON.parse(stdout.trim().split('\n').pop());
+        assert.equal(report.skipped, true);
+        assert.equal(report.required, undefined);
+    });
+
+    test('exits 1 under --require-fixtures: nothing to check is not a pass', async () => {
+        const { code, stdout } = await runMissingFixtures(['--require-fixtures']);
+        assert.equal(code, 1);
+        const report = JSON.parse(stdout.trim().split('\n').pop());
+        assert.equal(report.skipped, true);
+        assert.equal(report.required, true);
     });
 });

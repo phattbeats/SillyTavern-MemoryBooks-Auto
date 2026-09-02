@@ -48,3 +48,27 @@ Cost of the live capture (12 calls across 5 slices + rerun + pin checks):
 `.github/workflows/acceptance-harness.yml` runs `node eval/runRewriteAcceptance.js --json`
 offline (replayed from `eval/fixtures/rewriteAcceptance-canned.json`, committed) on every
 push/PR to `main` — no network, no API keys.
+
+## Addendum (PHA-2729, 2026-08-30): the CI gate currently checks nothing
+
+`2e5b3fc` (privacy: stop shipping personal roleplay eval fixtures) landed after
+`8587c1e` (this harness). The fixtures this harness replays are gitignored, so on a
+clean checkout `node eval/runRewriteAcceptance.js --json` prints
+`{"skipped":true,...}` and **exits 0** — verified on `origin/main` @ `01ea68a`.
+`.github/workflows/acceptance-harness.yml` runs exactly that command, so the
+acceptance-harness job is currently green by having nothing to run.
+
+The privacy decision is correct and stands: the transcript is a personal chat log
+and is not distributable. But "nothing ran" and "checks passed" must not look
+identical to a caller that depends on the gate.
+
+- `--require-fixtures` (added here) exits 1 when the fixtures are absent, so the
+  rewrite's own gate cannot pass by vacancy. CI's default invocation is unchanged,
+  so unrelated PRs do not go red.
+- Restoring real enforcement in CI needs a **synthetic, non-personal fixture set**
+  (transcript + reference book + canned replies) committed alongside the local-only
+  Magisa ones. Tracked separately; that is what makes PHA-2729's "harness first,
+  calibrated green" true on a clean checkout rather than only on this machine.
+
+The KNOWN-BAD table above was measured against the local fixtures and remains the
+calibration of record; it is reproducible only where those fixtures exist.
