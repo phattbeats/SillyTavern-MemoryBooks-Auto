@@ -30,13 +30,17 @@ import {
     attributeSources,
     buildOneShotPrompt,
     collectClaimedKeywords,
+    collectPriorAwards,
+    dropFrozenEntries,
     dropMemoryTitleCollisions,
     enforceGlobalKeywordUniqueness,
     formatExistingEntries,
     formatTranscript,
     generateOneShotEntries,
     hashContent,
+    planIncrementalRun,
     summarizeOneShot,
+    transcriptHighWater,
 } from './oneShotLorebookCore.js';
 
 const LOG = 'STMemoryBooks: OneShot';
@@ -52,13 +56,17 @@ export function resolveOneShotConfig(autoModule, chatMetadata) {
     const perChat = chatMetadata?.stmbc?.oneShot || {};
     const cfg = { ...ONE_SHOT_DEFAULTS, enabled: true, profile: undefined };
 
-    for (const key of ['truncate', 'maxEntries', 'minContentChars', 'order', 'enabled', 'profile']) {
+    cfg.incremental = true;
+    for (const key of ['truncate', 'maxEntries', 'minContentChars', 'order', 'enabled', 'profile', 'incremental']) {
         if (global[key] != null) cfg[key] = global[key];
         if (perChat[key] != null) cfg[key] = perChat[key];
     }
     if (typeof global.prompt === 'string' && global.prompt.trim()) cfg.prompt = global.prompt;
     if (typeof perChat.prompt === 'string' && perChat.prompt.trim()) cfg.prompt = perChat.prompt;
     cfg.enabled = cfg.enabled !== false;
+    // PHA-2693: incremental is the default, but the full rebuild stays one
+    // setting away as the ground truth to compare a suspect book against.
+    cfg.incremental = cfg.incremental !== false;
     return cfg;
 }
 
@@ -145,14 +153,40 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
     const existing = entriesForCoverage(lorebook.data);
     const lorePool = existing.filter(e => !e.isMemory);
 
+    // PHA-2693 Build item 5: decide what actually has to be re-derived before
+    // spending the call. `plan.unresolved` is the chunked path's open-question
+    // ledger when a caller has one — the one-shot path produces no ledger of
+    // its own (a single call has nothing left unresolved to carry), so today
+    // this input is dormant rather than live. It is wired here so it works the
+    // moment a producer exists, rather than needing this decision revisited.
+    const incremental = planIncrementalRun({
+        existing,
+        messages: plan.messages,
+        unresolvedQuestions: plan.unresolved,
+        enabled: cfg.incremental !== false,
+    });
+
+    if (incremental.canSkipCall) {
+        return {
+            ok: true,
+            message: `one-shot lorebook: nothing to do — ${incremental.reason}`,
+            created: 0, updated: 0, collisions: [], entries: [],
+            skipped: incremental.frozen.map(f => ({ title: f.title, reason: f.reason })),
+            contradictions: [],
+            incremental,
+        };
+    }
+
     const prompt = buildOneShotPrompt({
         transcriptText: plan.transcript,
-        existingText: formatExistingEntries(existing),
+        existingText: formatExistingEntries(existing, incremental.frozenTitles),
         maxEntries: cfg.maxEntries,
         template: cfg.prompt || ONE_SHOT_PROMPT,
     });
 
-    onProgress?.(`Reading the whole story in one pass (~${plan.storyTokens} tokens)…`);
+    onProgress?.(incremental.mode === 'incremental'
+        ? `Reading the whole story in one pass (~${plan.storyTokens} tokens); ${incremental.reason}…`
+        : `Reading the whole story in one pass (~${plan.storyTokens} tokens)…`);
 
     const conn = resolveJobsConnection(cfg.profile);
     const call = typeof generate === 'function'
@@ -164,9 +198,30 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
         return { ok: false, message: 'The model returned no usable entry set for the one-shot pass.', created: 0, updated: 0, collisions: [], entries: [] };
     }
 
+    // Rule 6 asks the model to leave settled entries out; this makes it true,
+    // including for a user's custom prompt template that never carried rule 6.
+    const thawed = dropFrozenEntries(parsed.entries, incremental.frozenTitles);
+    if (thawed.skipped.length) {
+        console.info(`${LOG}: dropped ${thawed.skipped.length} re-emitted settled entr${thawed.skipped.length === 1 ? 'y' : 'ies'}:`, thawed.skipped);
+    }
+
+    // A model that re-emits ONLY settled entries has agreed with the run's own
+    // staleness call. That is a correct no-change incremental run, not the
+    // "everything collided with a scene memory" failure below it.
+    if (!thawed.entries.length && thawed.skipped.length) {
+        return {
+            ok: true,
+            message: summarizeOneShot({ created: 0, updated: 0, frozen: incremental.frozen.length }),
+            created: 0, updated: 0, collisions: [], entries: [],
+            skipped: incremental.frozen.map(f => ({ title: f.title, reason: f.reason })),
+            contradictions: [],
+            incremental,
+        };
+    }
+
     // A model that echoes a scene-memory title back would have its lore written
     // straight over the chronological record — the upsert matches on comment.
-    const guarded = dropMemoryTitleCollisions(parsed.entries, existing);
+    const guarded = dropMemoryTitleCollisions(thawed.entries, existing);
     if (guarded.skipped.length) {
         console.warn(`${LOG}: skipped ${guarded.skipped.length} entr${guarded.skipped.length === 1 ? 'y' : 'ies'} whose title collides with a scene memory:`, guarded.skipped);
     }
@@ -182,7 +237,12 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
     // rewrites them, so stealing their keys would silently break retrieval.
     for (const k of collectClaimedKeywords(existing.filter(e => e.isMemory))) claimedByExisting.add(k);
 
-    const { entries, collisions } = enforceGlobalKeywordUniqueness(guarded.entries, claimedByExisting);
+    // PHA-2693 Build item 6: the awards this book already reflects, so a
+    // keyword released by the entry that is being rewritten cannot be taken off
+    // it by a newcomer that merely has a longer title.
+    const priorAwards = collectPriorAwards(existing);
+
+    const { entries, collisions } = enforceGlobalKeywordUniqueness(guarded.entries, claimedByExisting, priorAwards);
 
     // PHA-2681: a hand-edited entry is pinned and skipped rather than
     // re-derived from the same ambiguous source, and a genuine source
@@ -203,6 +263,11 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
     let inferred = 0;
     const failures = [];
     const toWrite = pinning.toWrite;
+    // How far this run had read. Stamped per entry (PHA-2693): the next run
+    // diffs each entry against its OWN mark, so "has the story said anything
+    // about you since I wrote you?" stays answerable for every entry
+    // independently of when the others were last touched.
+    const runHighWater = transcriptHighWater(plan.messages);
 
     for (let i = 0; i < toWrite.length; i++) {
         const entry = toWrite[i];
@@ -246,6 +311,7 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
                         stmbAutoContentHash: hashContent(entry.content),
                         stmbAutoConfidence: confidence,
                         stmbAutoVerifiedByHuman: false,
+                        stmbAutoRunHighWater: runHighWater,
                     },
                     // Only the last write needs to refresh the editor.
                     refreshEditor: i === toWrite.length - 1,
@@ -283,7 +349,7 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
     let message = summarizeOneShot({
         created, updated, dropped: parsed.dropped + guarded.skipped.length, collisions, keywordless,
         skipped: pinning.skipped, contradictions: pinning.contradictions,
-        inferred, renamed: pinning.renamed,
+        inferred, renamed: pinning.renamed, frozen: incremental.frozen.length,
     });
     if (pinning.renamed.length) {
         console.warn(`${LOG}: ${pinning.renamed.length} rename${pinning.renamed.length === 1 ? '' : 's'} of a pinned entry ignored, kept the human-verified title:`,
@@ -296,7 +362,7 @@ export async function runOneShotLorebook({ lorebook, plan, onProgress, generate 
     if (failures.length) message += ` · ${failures.length} write failure${failures.length === 1 ? '' : 's'}: ${failures.slice(0, 3).join('; ')}`;
 
     return {
-        ok: created + updated > 0 || pinning.skipped.length > 0,
+        ok: created + updated > 0 || pinning.skipped.length > 0 || incremental.frozen.length > 0,
         message, created, updated, collisions, entries,
         skipped: pinning.skipped, contradictions: pinning.contradictions,
     };
