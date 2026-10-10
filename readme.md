@@ -83,7 +83,7 @@ Other links:
 
 ## ✍️ Author Policy (this fork)
 
-**All commits on this fork must be authored as `phattbeats <obiwouldjablowme@protonmail.com>`.** No `Co-Authored-By:` trailer is allowed unless it credits @phattbeats. The same rule is enforced two ways: a local `.githooks/commit-msg` hook (installed by `bun run install-hooks`), and a GitHub Actions job (`.github/workflows/authorship-check.yml`) that runs on every PR to `main`. Branch protection requires that job to pass before merge.
+**All commits on this fork must be authored as `phattbeats <21150921+phattbeats@users.noreply.github.com>`.** No `Co-Authored-By:` trailer is allowed unless it credits @phattbeats. The same rule is enforced two ways: a local `.githooks/commit-msg` hook (installed by `bun run install-hooks`), and a GitHub Actions job (`.github/workflows/authorship-check.yml`) that runs on every PR to `main`. Branch protection requires that job to pass before merge.
 
 If you're a contributor, see [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/AUTHORSHIP.md](docs/AUTHORSHIP.md) for the full rule, the disallowed trailer list, and how to amend the commit message (`git commit --amend`).
 

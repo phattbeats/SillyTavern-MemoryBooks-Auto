@@ -22,7 +22,7 @@ green before merge.
 
 <!-- Reviewer confirmation: -->
 
-- [ ] **HEAD commit author is `phattbeats <obiwouldjablowme@protonmail.com>`.**
+- [ ] **HEAD commit author is `phattbeats <21150921+phattbeats@users.noreply.github.com>`.**
   - Confirmed locally with `git log -1 --format='%an <%ae>'`.
   - Confirmed by the `authorship-check` GitHub Actions job (green check).
 - [ ] **HEAD commit message contains no disallowed `Co-Authored-By:` trailers.**
