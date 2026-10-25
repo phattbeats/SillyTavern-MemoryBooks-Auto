@@ -19,7 +19,7 @@ commit author or `Co-Authored-By:` trailer.
 
 | Display name    | Email                                | Where it comes from                                            |
 | --------------- | ------------------------------------ | -------------------------------------------------------------- |
-| `phattbeats`    | `21150921+phattbeats@users.noreply.github.com`    | Brandon's ProtonMail — verified on PR-merged commits `95bf161`, `68c9d53`. |
+| `phattbeats`    | `21150921+phattbeats@users.noreply.github.com`    | Brandon's GitHub noreply address. `21150921` is the `phattbeats` account id, so GitHub links commits using it to the account. |
 | Claude Van Dam  | `van-dam@phatt.tech`, `<noreply@phatt.tech>` | This agent's placeholder addresses — NOT @phattbeats.                |
 
 ### How commits get accepted

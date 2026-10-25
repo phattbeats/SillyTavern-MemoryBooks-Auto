@@ -11,12 +11,13 @@ you need to know **why** a specific trailer is rejected.
 
 | Identity           | Symbol                                       |
 | ------------------ | -------------------------------------------- |
-| `phattbeats`       | `phattbeats <21150921+phattbeats@users.noreply.github.com>` (Brandon's ProtonMail) |
+| `phattbeats`       | `phattbeats <21150921+phattbeats@users.noreply.github.com>` (Brandon's GitHub noreply - `21150921` is the account id) |
 | `Claude Van Dam`   | `Claude Van Dam <van-dam@phatt.tech>` and `<noreply@phatt.tech>` — placeholder agent identity |
 | `Paperclip`        | `Paperclip <noreply@paperclip.ing>` — automation/co-author service |
 
-`95bf161` and `68c9d53` on `main` verify the `phattbeats` /
-`21150921+phattbeats@users.noreply.github.com` pair on PR-merged commits. The five
+`95bf161` and `68c9d53` on `main` verify the `phattbeats` author
+identity on PR-merged commits; they predate the switch to the GitHub
+noreply address and carry the older one. The five
 Claude Van Dam commits and one Paperclip `Co-Authored-By:` trailer on
 `main` predate this rule and are out of scope here (governance decision
 in [PHA-1749](https://github.com/phattbeats/SillyTavern-MemoryBooks-Auto/issues)):
