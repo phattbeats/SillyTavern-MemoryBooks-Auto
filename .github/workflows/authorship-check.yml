@@ -3,7 +3,7 @@
 # Runs on PRs that target `main` (and on direct pushes to main from
 # branches like `sync/*` or `feat/*`). Mirrors the local
 # `.githooks/commit-msg` rule at PR-time: a PR is blocked if its HEAD
-# commit is not authored as `phattbeats <obiwouldjablowme@protonmail.com>`
+# commit is not authored as `phattbeats <21150921+phattbeats@users.noreply.github.com>`
 # or if the HEAD commit message contains any disallowed
 # `Co-Authored-By:` trailer.
 #
@@ -53,7 +53,7 @@ jobs:
       - name: Verify HEAD author is phattbeats
         env:
           ALLOWED_NAME: phattbeats
-          ALLOWED_EMAIL: obiwouldjablowme@protonmail.com
+          ALLOWED_EMAIL: 21150921+phattbeats@users.noreply.github.com
         run: |
           set -euo pipefail
           HEAD_AUTHOR="$(git log -1 --format='%an <%ae>')"

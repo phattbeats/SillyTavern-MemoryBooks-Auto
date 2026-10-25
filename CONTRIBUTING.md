@@ -19,14 +19,14 @@ commit author or `Co-Authored-By:` trailer.
 
 | Display name    | Email                                | Where it comes from                                            |
 | --------------- | ------------------------------------ | -------------------------------------------------------------- |
-| `phattbeats`    | `obiwouldjablowme@protonmail.com`    | Brandon's ProtonMail — verified on PR-merged commits `95bf161`, `68c9d53`. |
+| `phattbeats`    | `21150921+phattbeats@users.noreply.github.com`    | Brandon's GitHub noreply address. `21150921` is the `phattbeats` account id, so GitHub links commits using it to the account. |
 | Claude Van Dam  | `van-dam@phatt.tech`, `<noreply@phatt.tech>` | This agent's placeholder addresses — NOT @phattbeats.                |
 
 ### How commits get accepted
 
 A commit lands on `main` only if **all** of the following are true:
 
-1. **HEAD author** is `phattbeats <obiwouldjablowme@protonmail.com>` (case
+1. **HEAD author** is `phattbeats <21150921+phattbeats@users.noreply.github.com>` (case
    sensitive). The local hook checks the trailer set; the GitHub Actions
    `.github/workflows/authorship-check.yml` re-checks HEAD author on every PR.
 2. **HEAD commit message** contains no disallowed `Co-Authored-By:` line.

@@ -5,7 +5,7 @@
 # Authorship rule — commit-msg hook (PHA-1750)
 #
 # The rule: this fork accepts commits and trailers only from
-#   phattbeats <obiwouldjablowme@protonmail.com>
+#   phattbeats <21150921+phattbeats@users.noreply.github.com>
 # Any `Co-Authored-By:` trailer that names the agent (Claude Van Dam) or
 # the agent's placeholder email domains (phatt.tech, paperclip.ing) is
 # rejected at commit time. Mirror rules are also enforced in CI via
@@ -54,7 +54,7 @@ if [ -n "$violations" ]; then
   printf '%s\n' "=================================================================" >&2
   printf '%s\n' "" >&2
   printf '%s\n' "This fork's policy:" >&2
-  printf '%s\n' "  - Commit author:        phattbeats <obiwouldjablowme@protonmail.com>" >&2
+  printf '%s\n' "  - Commit author:        phattbeats <21150921+phattbeats@users.noreply.github.com>" >&2
   printf '%s\n' "  - Trailer identity:     only trailers crediting @phattbeats are allowed" >&2
   printf '%s\n' "  - Disallowed trailers:  Claude Van Dam, noreply@phatt.tech," >&2
   printf '%s\n' "                          van-dam@phatt.tech, Paperclip <noreply@paperclip.ing>" >&2
