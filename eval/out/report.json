@@ -1,0 +1,58 @@
+{
+  "predictions": 0,
+  "raw": 57,
+  "merged": 31,
+  "metrics": {
+    "±1": {
+      "precision_vs_raw": {
+        "hit": 0,
+        "total": 0,
+        "value": null
+      },
+      "precision_vs_merged": {
+        "hit": 0,
+        "total": 0,
+        "value": null
+      },
+      "recall_vs_raw": {
+        "hit": 0,
+        "total": 57,
+        "value": 0
+      },
+      "recall_vs_merged": {
+        "hit": 0,
+        "total": 31,
+        "value": 0
+      }
+    },
+    "±2": {
+      "precision_vs_raw": {
+        "hit": 0,
+        "total": 0,
+        "value": null
+      },
+      "precision_vs_merged": {
+        "hit": 0,
+        "total": 0,
+        "value": null
+      },
+      "recall_vs_raw": {
+        "hit": 0,
+        "total": 57,
+        "value": 0
+      },
+      "recall_vs_merged": {
+        "hit": 0,
+        "total": 31,
+        "value": 0
+      }
+    }
+  },
+  "falsePositives_vs_raw_tol1": [],
+  "gate": {
+    "metric": "precision_vs_raw @±1",
+    "threshold": 0.9,
+    "value": null,
+    "pass": false
+  }
+}

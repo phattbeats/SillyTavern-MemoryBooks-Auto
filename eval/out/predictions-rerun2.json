@@ -1,0 +1,219 @@
+{
+  "fixture": "fixture.json",
+  "config": {
+    "endpoint": "http://127.0.0.1:8787/v1/chat/completions",
+    "model": "claude-haiku-4-5-20251001",
+    "temperature": 0,
+    "window": 26,
+    "overlap": 8,
+    "truncate": 500,
+    "guard": 4,
+    "prompt": "You are a scene-boundary detector for long-form fiction. Below are numbered\nmessages in the form \"[id] Speaker: text\" (truncated). Identify every message\nID that BEGINS a new scene. Mark EVERY change of location however small (room\nto room, indoors to outdoors), any time skip of an hour or more, dream\nsequences, cutaways, and interludes. Be sensitive rather than conservative.\nContinuous action in one place is ONE scene even if the topic shifts.\nDo NOT mark any boundary within the final 4 messages (that scene may be\nincomplete). Reply with ONLY a JSON array of integers, e.g. [12, 27], or []."
+  },
+  "stats": {
+    "windows": 18,
+    "skippedWindows": 18,
+    "predictions": 0
+  },
+  "predictions": [],
+  "windows": [
+    {
+      "window": 0,
+      "start": 0,
+      "end": 25,
+      "guardStart": 22,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 1,
+      "start": 18,
+      "end": 43,
+      "guardStart": 40,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 2,
+      "start": 36,
+      "end": 61,
+      "guardStart": 58,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 3,
+      "start": 54,
+      "end": 79,
+      "guardStart": 76,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 4,
+      "start": 72,
+      "end": 97,
+      "guardStart": 94,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 5,
+      "start": 90,
+      "end": 115,
+      "guardStart": 112,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 6,
+      "start": 108,
+      "end": 133,
+      "guardStart": 130,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 7,
+      "start": 126,
+      "end": 151,
+      "guardStart": 148,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 8,
+      "start": 144,
+      "end": 169,
+      "guardStart": 166,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 9,
+      "start": 162,
+      "end": 187,
+      "guardStart": 184,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 10,
+      "start": 180,
+      "end": 205,
+      "guardStart": 202,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 11,
+      "start": 198,
+      "end": 223,
+      "guardStart": 220,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 12,
+      "start": 216,
+      "end": 241,
+      "guardStart": 238,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 13,
+      "start": 234,
+      "end": 259,
+      "guardStart": 256,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 14,
+      "start": 252,
+      "end": 277,
+      "guardStart": 274,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 15,
+      "start": 270,
+      "end": 295,
+      "guardStart": 292,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 16,
+      "start": 288,
+      "end": 313,
+      "guardStart": 310,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    },
+    {
+      "window": 17,
+      "start": 303,
+      "end": 328,
+      "guardStart": 325,
+      "skipped": true,
+      "error": "API 500: {\"error\":{\"message\":\"claude CLI failed: spawn claude ENOENT\\n\"}}",
+      "rawAttempts": [],
+      "accepted": [],
+      "dropped": []
+    }
+  ]
+}
